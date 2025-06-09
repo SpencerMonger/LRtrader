@@ -1,0 +1,915 @@
+from abc import ABC, abstractmethod, abstractproperty
+from decimal import Decimal
+import threading
+from typing import TYPE_CHECKING, Optional, Union, Any
+from datetime import datetime, timedelta
+
+from ibapi.contract import Contract as IBContract
+from loguru import logger
+
+from error import (
+    CannotModifyFilledOrderError,
+    InvalidExecutionError,
+    OrderDoesNotExistError,
+    StopLossCooldownIsActiveError,
+)
+from schema import MarketData, MongerOrder, Position, Prediction, Trade
+from schema.assignment import TraderAssignment
+from schema.enums import OrderAction, OrderStatus, OrderType
+from schema.prediction import PriceDirection
+
+from .order_queue import OrderQueue, queued_execution
+from .predicate import ALL_PREDICATES, ConfidenceThresholdPredicate, PositionSizePredicate
+
+
+if TYPE_CHECKING:
+    from app import TradeMonger
+
+
+class OrderIdManager:
+    """
+    A simple wrapper around the TWS API's nextOrderId method to ensure that order IDs are unique.
+
+    :param tws_app: The TWS application instance.
+    """
+
+    def __init__(self, tws_app: "TradeMonger"):
+        self.tws_app = tws_app
+        self._next_id = None
+        self._lock = threading.Lock()
+
+    def next_id(self):
+        """
+        Get the next order ID.
+        """
+        with self._lock:
+            if self._next_id is None:
+                self._next_id = self.tws_app.nextOrderId()
+            next_id = self._next_id
+            self._next_id += 1
+            return next_id
+
+
+class AbstractOrderExecutorMixin(ABC):
+    """
+    An abstract mixin for handling order execution.
+    """
+
+    position: Position
+    assignment: TraderAssignment
+    market_data: MarketData
+
+    initialized: bool
+    is_emergency_exit: bool
+    tws_app: Optional["TradeMonger"]
+    portfolio_manager: Optional[Any]
+
+    @abstractproperty
+    def contract(self) -> IBContract:
+        return None
+
+    @abstractmethod
+    def place_order(self, monger_order: MongerOrder):
+        raise NotImplementedError
+
+    @abstractmethod
+    def cancel_order(self, order: MongerOrder):
+        raise NotImplementedError
+
+    @abstractmethod
+    def modify_order(self, order: MongerOrder):
+        raise NotImplementedError
+
+    @abstractmethod
+    def _place_take_profit(self):
+        raise NotImplementedError
+
+    @abstractmethod
+    def _place_stop_loss(self):
+        raise NotImplementedError
+
+    @abstractmethod
+    def _emergency_exit_protocol(self):
+        raise NotImplementedError
+
+
+class OrderStatusMixin(AbstractOrderExecutorMixin):
+    """
+    A mixin for handling order status updates from TWS.
+    """
+
+    @queued_execution
+    def handle_order_status(
+        self,
+        order_id: int,
+        status: str,
+        filled: Union[float, Decimal],
+        avg_fill_price: Union[float, Decimal],
+        client_id: int,
+    ):
+        """
+        Handle order status updates from TWS.
+
+        :param int order_id: The order ID.
+        :param str status: The order status.
+        :param Union[float, Decimal] filled: The filled size.
+        :param Union[float, Decimal] avg_fill_price: The average fill price.
+        """
+
+        # Gaurd to ensure that filled and avg_fill_price are float values
+        filled = float(filled)
+        avg_fill_price = float(avg_fill_price)
+
+        match status:
+            case OrderStatus.PRE_SUBMITTED.value:
+                self._handle_order_pre_submitted(order_id, filled, avg_fill_price, client_id)
+            case OrderStatus.SUBMITTED.value:
+                self._handle_order_submitted(order_id, filled, avg_fill_price, client_id)
+            case OrderStatus.FILLED.value:
+                self._handle_order_filled(order_id, filled, avg_fill_price, client_id)
+            case OrderStatus.CANCELED.value:
+                self._handle_order_canceled(order_id, filled, avg_fill_price, client_id)
+            case _:
+                try:
+                    order = self.position.pool[order_id]
+                    logger.debug(
+                        f"ORDER STATUS -- Order ID {order_id} ({order.order_type}): {status}"
+                    )
+                except KeyError:
+                    logger.debug(
+                        f"ORDER STATUS -- Order ID {order_id} (UNKOWN): not found in position pool."
+                    )
+
+        # Make sure that we cancel any orders that must be cancelled as a result of the recent
+        # status update
+        for order_to_cancel in self.position.orders_to_cancel:
+            self.cancel_order(order_to_cancel)
+
+        # Clear the list after processing to prevent duplicates
+        self.position.orders_to_cancel.clear()
+
+    def _handle_order_pre_submitted(
+        self, order_id: int, filled: float, avg_fill_price: float, client_id: int
+    ):
+        """
+        Handle an order being pre-submitted.
+
+        :param int order_id: The order ID.
+        :param float filled: The filled size.
+        :param float avg_fill_price: The average fill price.
+        """
+        # We only need to do things for stop loss orders here
+        try:
+            submitted_order = self.position.pool[order_id]
+        except OrderDoesNotExistError:
+            logger.warning(
+                f"PRE-SUBMITTED [{self.assignment.ticker}] -- "
+                f"Order ID {order_id} not found in position pool."
+            )  # noqa: E501
+            return
+
+        logger.info(
+            f"PRE-SUBMITTED [{self.assignment.ticker}] {submitted_order.order_type} -- Order ID {order_id}: "  # noqa: E501
+            f"({submitted_order.order_type}: {submitted_order.size} X ${submitted_order.limit_price}) "  # noqa: E501
+            f"Status: {filled} @ ${avg_fill_price}"
+        )
+        match submitted_order.order_type:
+            case OrderType.STOP_LOSS:
+                # Check if the position size is 0 and if it is, then cancel the order
+                if self.position.size == 0:
+                    logger.warning(
+                        f"Position size is 0, cancelling excess STOP LOSS "
+                        f"order {submitted_order.order_id}"
+                    )
+                    self.cancel_order(submitted_order)
+            case _:
+                return
+
+    def _handle_order_submitted(
+        self, order_id: int, filled: float, avg_fill_price: float, client_id: int
+    ):
+        """
+        Handle an order being submitted.
+
+        :param int order_id: The order ID.
+        :param float filled: The filled size.
+        :param float avg_fill_price: The average fill price.
+        """
+        try:
+            submitted_order = self.position.handle_submitted(order_id, filled, avg_fill_price)
+        except OrderDoesNotExistError:
+            logger.warning(
+                f"SUBMITTED [{self.assignment.ticker}] -- "
+                f"Order ID {order_id} not found in position pool."
+            )
+            return
+
+        logger.info(
+            f"SUBMITTED [{self.assignment.ticker}] {submitted_order.order_type} -- Order ID {order_id}: "  # noqa: E501
+            f"({submitted_order.order_type}: {submitted_order.size} X ${submitted_order.limit_price}) "  # noqa: E501
+            f"Status: {filled} @ ${avg_fill_price}"
+        )
+        match submitted_order.order_type:
+            case OrderType.ENTRY:
+                if filled > 0:
+                    self._place_stop_loss()
+                    self._place_take_profit()
+
+            case OrderType.EXIT:
+                if filled > 0:
+                    self._place_stop_loss()
+                    self._place_take_profit()
+
+            case OrderType.TAKE_PROFIT:
+                if filled > 0:
+                    self._place_stop_loss()
+
+            # This means that the stop loss price was triggered
+            case OrderType.STOP_LOSS:
+                if filled > 0:
+                    self._place_take_profit()
+
+            case OrderType.EMERGENCY_EXIT:
+                pass
+
+    def _handle_order_filled(
+        self, order_id: int, filled: float, avg_fill_price: float, client_id: int
+    ):
+        """
+        Handle an order being filled.
+
+        :param int order_id: The order ID.
+        :param float filled: The filled size.
+        :param float avg_fill_price: The average fill price.
+        """
+        # --- Get order details BEFORE updating position state --- 
+        try:
+            order_in_pool = self.position.pool[order_id]
+            original_order_type = order_in_pool.order_type
+            original_size = order_in_pool.size
+            original_limit_price = order_in_pool.limit_price
+        except OrderDoesNotExistError:
+            logger.warning(
+                f"FILLED PRE-CHECK [{self.assignment.ticker}] -- "
+                f"Order ID {order_id} not found in position pool. Cannot process fill."
+            )
+            return
+        # --- End Get order details ---
+
+        try:
+            # This call updates Position state and removes the order from the pool
+            filled_order = self.position.handle_filled(order_id, filled, avg_fill_price)
+        except OrderDoesNotExistError:
+            # This case should ideally not happen if the pre-check passed, but log just in case
+            logger.warning(
+                f"FILLED POST-CHECK [{self.assignment.ticker}] -- "
+                f"Order ID {order_id} was not in position pool after attempting handle_filled."
+            )
+            return
+
+        # Log using the retrieved original details, as filled_order might have changed state
+        logger.info(
+            f"FILLED [{self.assignment.ticker}] {original_order_type} -- Order ID {order_id}: "
+            f"({original_order_type}: {original_size} X ${original_limit_price}) " # Use original details for log
+            f"Status: {filled} @ ${avg_fill_price}"
+        )
+        
+        # --- Use the original order type for the match statement ---
+        match original_order_type:
+            case OrderType.ENTRY:
+                self._place_stop_loss()
+                self._place_take_profit()
+
+            case OrderType.EXIT:
+                # If an exit order fills, cancel all associated TP/SL orders
+                logger.info(f"EXIT FILLED [{self.assignment.ticker}] -- Cancelling associated bracket orders.")
+                for sl_order in self.position.stop_loss_orders:
+                    self.cancel_order(sl_order)
+                for tp_order in self.position.take_profit_orders:
+                    self.cancel_order(tp_order)
+
+            case OrderType.TAKE_PROFIT:
+                # If TP fills (partially or fully), adjust/replace the SL
+                self._place_stop_loss()
+
+            case OrderType.STOP_LOSS:
+                # If SL fills (partially or fully), adjust/replace the TP
+                self._place_take_profit()
+
+            case OrderType.EMERGENCY_EXIT:
+                # If Emergency Exit fills, ensure all other orders are cancelled (redundancy)
+                logger.info(f"EMERGENCY EXIT FILLED [{self.assignment.ticker}] -- Cancelling any remaining bracket orders.")
+                for sl_order in self.position.stop_loss_orders:
+                    self.cancel_order(sl_order)
+                for tp_order in self.position.take_profit_orders:
+                    self.cancel_order(tp_order)
+                self.is_emergency_exit = False
+
+            case OrderType.DANGLING_SHARES:
+                 # If a dangling shares order fills and the *internal* position is now zero,
+                 # cancel remaining brackets. The TWS update check provides redundancy.
+                 if self.position.size == 0:
+                     logger.info(f"DANGLING SHARES FILLED & INTERNAL POS ZERO [{self.assignment.ticker}] -- Cancelling any remaining bracket orders.")
+                     for sl_order in self.position.stop_loss_orders:
+                         self.cancel_order(sl_order)
+                     for tp_order in self.position.take_profit_orders:
+                         self.cancel_order(tp_order)
+            
+            case _: # Should not happen if order was found in pool initially
+                 logger.error(f"Unhandled filled order type in OrderExecutor: {original_order_type}")
+
+    def _handle_order_canceled(
+        self, order_id: int, filled: float, avg_fill_price: float, client_id: int
+    ):
+        """
+        Handle an order being canceled.
+
+        :param int order_id: The order ID.
+        :param float filled: The filled size.
+        :param float avg_fill_price: The average fill price.
+        """
+        try:
+            cancelled_order = self.position.handle_cancelled(order_id, filled, avg_fill_price)
+        except OrderDoesNotExistError:
+            logger.warning(
+                f"CANCELED [{self.assignment.ticker}] -- "
+                f"Order ID {order_id} not found in position pool."
+            )
+            return
+
+        logger.info(
+            f"CANCELLED [{self.assignment.ticker}] {cancelled_order.order_type} -- Order ID {order_id}: "  # noqa: E501
+            f"({cancelled_order.order_type}: {cancelled_order.size} X ${cancelled_order.limit_price}) "  # noqa: E501
+            f"Status: {filled} @ ${avg_fill_price}"
+        )
+        match cancelled_order.order_type:
+            # If we have cancelled an exit order, we want to make sure that we
+            # replace the order with a new one
+            case OrderType.EXIT:
+                self.position.trade_to_close.close_exit_order()
+                self.handle_expired_positions()
+
+            case OrderType.TAKE_PROFIT:
+                self._place_stop_loss()
+
+            case OrderType.STOP_LOSS:
+                self._place_take_profit()
+
+            # If we cancel an emergency exit, we want to make sure that we
+            # replace the order with a new one
+            case OrderType.EMERGENCY_EXIT:
+                self._emergency_exit_protocol()
+            
+            case OrderType.DANGLING_SHARES:
+                 logger.info(f"[{self.assignment.ticker}] Processing CANCELED status for DANGLING_SHARES order ID {order_id}.")
+                 # The actual removal from pool happens in position.handle_cancelled
+                 pass 
+
+
+class MarketDataMixin(AbstractOrderExecutorMixin):
+    """
+    A mixin for handling market data updates from TWS.
+    """
+
+    @queued_execution
+    def handle_market_data_update(self):
+        """
+        Handle market data updates.
+        """
+        # If we have no position, we don't do anything
+        if not self.position.side:
+            return
+
+        # If we have a position, we need to ensure that our stop loss order is up to date
+        self._place_stop_loss()
+        self._place_take_profit()
+
+
+class TraderMixin(AbstractOrderExecutorMixin):
+    """
+    A mixin for handling updates from the trader.
+    """
+
+    def __init__(self):
+        self._predicates = {
+            predicate: predicate(assignment=self.assignment) for predicate in ALL_PREDICATES
+        }
+        self.consecutive_dangling_shares_flags = 0
+
+        return self
+
+    def check_boolean_entry_predicate(self, prediction: Prediction) -> bool:
+        """
+        Check if the entry predicates are satisfied.
+
+        :param Prediction prediction: The prediction from the inference model.
+        :return bool: True if the entry predicates are satisfied, False otherwise.
+        """
+        # Remove confidence predicate check
+        # confidence_predicate = self._predicates[ConfidenceThresholdPredicate]
+        max_position_size_predicate = self._predicates[PositionSizePredicate]
+
+        # confidence_predicate_result = confidence_predicate.apply(prediction)
+        max_position_size_predicate_result = max_position_size_predicate.apply(self.position)
+        is_in_cooldown = self.position.in_cooldown
+
+        # Log remaining predicate results
+        logger.debug(
+            f"[{self.assignment.ticker}] Entry Predicates Check: "
+            # f"ConfidenceOK={confidence_predicate_result}, " # Removed
+            f"MaxSizeOK={max_position_size_predicate_result}, "
+            f"InCooldown={is_in_cooldown}"
+        )
+
+        # Update result logic to exclude confidence check
+        result = (
+            # confidence_predicate_result and # Removed
+            max_position_size_predicate_result
+            and not is_in_cooldown
+        )
+        logger.debug(f"[{self.assignment.ticker}] Final Predicate Result: {result}")
+        return result
+
+    def check_position_scaling_predicate(self) -> float:
+        """
+        Check the position scaling predicate.
+
+        :return float: The scaling factor for the position size.
+        """
+        return 1.0
+
+    @queued_execution
+    def handle_prediction(self, prediction: Prediction):
+        """
+        Handle the prediction and execute the order if the conditions are favorable.
+
+        :param Prediction prediction: The prediction from the inference model.
+        """
+        logger.debug(f"[{self.assignment.ticker}] Handling prediction: Flag={prediction.flag}, Conf={getattr(prediction, 'confidence', 'N/A')}")
+        predicates_passed = self.check_boolean_entry_predicate(prediction)
+        logger.debug(f"[{self.assignment.ticker}] Predicates passed: {predicates_passed}")
+
+        if predicates_passed:
+            # NOTE: The position size for a ticker is handled in the assignment
+            # scale_factor = self.check_position_scaling_predicate()
+            # position_size = self.assignment.position_size * scale_factor
+
+            # Ensure that we do not exceed the maximum position size
+            max_position_size = self.assignment.max_position_size
+            delta_to_max = max_position_size - self.position.size
+            position_size = min(delta_to_max, self.assignment.position_size)
+
+            entry_price = self.market_data.order_book.get_entry_price(prediction.flag)
+            logger.debug(f"[{self.assignment.ticker}] Calculated Entry: Size={position_size}, Price={entry_price}")
+
+            if position_size == 0:
+                logger.debug(f"[{self.assignment.ticker}] Position size is 0, skipping order placement.")
+                return
+
+            order_action = (
+                OrderAction.BUY if prediction.flag == PriceDirection.BULLISH else OrderAction.SELL
+            )
+            self.place_order(
+                order_type=OrderType.ENTRY,
+                order_action=order_action,
+                size=position_size,
+                price=entry_price,
+            )
+
+    @queued_execution
+    def handle_expired_positions(self):
+        """
+        Handle expired positions.
+        """
+
+        try:
+            if expired_trade := self.position.trade_to_close:
+                if self.position.in_cooldown:
+                    return
+
+                # If there is a current exit order, then we don't need to place a new one
+                if self.position.trade_to_close.exit_order:
+                    return
+
+                exit_price = self.market_data.order_book.get_exit_price(self.position.side)
+
+                self.place_order(
+                    order_type=OrderType.EXIT,
+                    order_action=self.position.exit_action,
+                    size=expired_trade.size,
+                    price=exit_price,
+                    parent_trade=expired_trade,
+                )
+        except InvalidExecutionError as e:
+            logger.warning(e)
+
+    @queued_execution
+    def handle_dangling_shares(self):
+        """
+        Handle dangling shares.
+        """
+        # Add verbose logging to check values
+        logger.debug(f"[{self.assignment.ticker}] Dangling Check: Internal Size={self.position.relevant_position_size}, TWS Size={self.position.true_share_count}")
+        
+        if self.position.relevant_position_size != self.position.true_share_count:
+            self.consecutive_dangling_shares_flags += 1
+            logger.warning(
+                f"SHARE MISMATCH [{self.assignment.ticker}] -- "
+                f"TWS Position Size: {self.position.true_share_count}, "
+                f"Internal Position Size: {self.position.relevant_position_size}"
+                f"(Consecutive Flags: {self.consecutive_dangling_shares_flags})"
+            )
+
+            if self.consecutive_dangling_shares_flags >= 3:
+                self._dangling_shares_protocol()
+        else:
+            if self.consecutive_dangling_shares_flags:
+                logger.success(
+                    f"SHARE MISMATCH RESOLVED [{self.assignment.ticker}] -- "
+                    f"TWS Position Size: {self.position.true_share_count}, "
+                    f"Internal Position Size: {self.position.relevant_position_size}"
+                )
+            self.consecutive_dangling_shares_flags = 0
+
+    @queued_execution
+    def handle_emergency_exit(self, final: bool = False):
+        """
+        Handle emergency exit.
+        """
+        logger.warning(f"[{self.assignment.ticker}] -- Handling emergency exit")
+        self._emergency_exit_protocol(final=final)
+
+    @queued_execution
+    def handle_pnl_checks(self) -> None:
+        # Check if the realized P/L values of any trades have exceeded the threshold
+        if self.position.realized_pnls:
+            min_pnl = min(self.position.realized_pnls)
+            if min_pnl < (-1 * self.assignment.max_loss_per_trade):
+                self.execute_emergency_exit()
+
+    @queued_execution
+    def handle_pnl_update(self, realized_pnl: float, unrealized_pnl: float) -> None:
+        # Check if the realized P/L has exceeded the clip threshold
+        return
+        # TODO: Removed out clipping for now as it was causing bugs
+        # total_pnl = realized_pnl + unrealized_pnl
+
+        # if realized_pnl > self.assignment.clip_activation and not self.clip_active:
+        #     logger.success(
+        #         f"[{self.assignment.ticker}] Activating Clip Level: "
+        #         f"${self.assignment.clip_activation}"
+        #     )
+        #     self.clip_active = True
+
+        # # If the clip is active, check if the total P/L has fallen below the threshold
+        # if self.clip_active and total_pnl < self.assignment.clip_stop_loss:
+        #     logger.warning(
+        #         f"[{self.assignment.ticker}] Clip stop loss level met: "
+        #         f"({self.assignment.clip_stop_loss}). Exiting position."
+        #     )
+        #     self.execute_emergency_exit()
+
+
+class OrderExecutor(OrderStatusMixin, MarketDataMixin, TraderMixin):
+    def __init__(
+        self,
+        position: Position,
+        assignment: TraderAssignment,
+        market_data: MarketData,
+        tws_app: Optional["TradeMonger"] = None,
+        portfolio_manager: Optional[Any] = None
+    ):
+        self.assignment = assignment
+        self.position = position
+        self.market_data = market_data
+        self.order_queue = OrderQueue()
+
+        # Initialize Mixins
+        super(OrderStatusMixin, self).__init__()
+        super(MarketDataMixin, self).__init__()
+        super(TraderMixin, self).__init__()
+
+        self.initialized = False
+        self.is_emergency_exit = False
+        self.clip_active = False
+        self.portfolio_manager = portfolio_manager
+
+        # Pass portfolio_manager in context when creating Position
+        context = {'portfolio_manager': self.portfolio_manager}
+        self.position = Position(assignment=assignment, model_config={"arbitrary_types_allowed": True}, **context)
+
+    @property
+    def contract(self) -> IBContract:
+        """
+        Return the contract for the current position.
+
+        :return IBContract: The IBContract instance.
+        """
+        contract = IBContract()
+        contract.conId = self.position.contract_id
+        contract.symbol = self.assignment.ticker
+        contract.secType = "STK"
+        contract.exchange = "SMART"
+        contract.currency = "USD"
+        return contract
+
+    def initialize(self, app: "TradeMonger") -> None:
+        """
+        Initialize the order executor with the TradeMonger application instance.
+
+        :param app: The TradeMonger application instance.
+        """
+        self.tws_app = app
+        self.order_id_manager = OrderIdManager(app)
+        self.initialized = True
+        self.order_queue.start()
+
+    def shutdown(self):
+        """
+        Shutdown the order executor.
+        """
+        try:
+            self.order_queue.stop()
+        except RuntimeError:
+            pass
+
+    def execute_emergency_exit(self, final: bool = False) -> None:
+        """
+        Execute the emergency exit protocol, setting the flag before placing the task in the queue.
+        """
+        if not final:
+            self.is_emergency_exit = True
+        self.handle_emergency_exit(final=final)
+
+    def place_order(
+        self,
+        order_type: OrderType,
+        order_action: OrderAction,
+        size: float,
+        price: float,
+        parent_trade: Optional[Trade] = None,
+    ) -> int:
+        if not self.initialized:
+            raise RuntimeError("OrderExecutor must be initialized before placing orders")
+
+        if self.is_emergency_exit and order_type != OrderType.EMERGENCY_EXIT:
+            return
+
+        order_id = self.order_id_manager.next_id()
+        order = MongerOrder(
+            order_id=order_id,
+            order_type=order_type,
+            action=order_action,
+            size=size,
+            limit_price=price,
+        )
+
+        # Verify the order and submit it to our pool -- shoudl catch exceptions here
+        try:
+            self.position.submit_order(order, parent_trade=parent_trade)
+        except InvalidExecutionError as e:
+            logger.warning(f"Order {order_id} is invalid: {e}")
+            return
+        ib_order = order.ib_order
+        logger.debug(
+            f"[{self.assignment.ticker}] -- Placing {order.order_type.value} order with id: "
+            f"{order_id}"
+        )
+        # --- DEBUG LOG ADDED ---
+        logger.trace(f"[{self.assignment.ticker}] Submitting IBOrder Attributes: Action={ib_order.action}, Type={ib_order.orderType}, Qty={ib_order.totalQuantity}, LmtPx={ib_order.lmtPrice}, AuxPx={getattr(ib_order, 'auxPrice', 'N/A')}, TIF={ib_order.tif}, GTD={getattr(ib_order, 'goodTillDate', 'N/A')}, OTH={ib_order.outsideRth}, Transmit={ib_order.transmit}, ETradeOnly={getattr(ib_order, 'etradeOnly', 'N/A')}")
+        # --- END DEBUG LOG ---
+        self.tws_app.placeOrder(order_id, self.contract, ib_order)
+        return order_id
+
+    def cancel_order(self, order: MongerOrder) -> None:
+        if not self.initialized:
+            raise RuntimeError("OrderExecutor must be initialized before canceling orders")
+
+        # Check for the order in the pool -- if it has already been cancelled, than it will not
+        # be in the pool
+        try:
+            _ = self.position.pool[order.order_id] # Just check existence
+        except OrderDoesNotExistError:
+            logger.debug(f"[{self.assignment.ticker}] Order {order.order_id} already removed from pool, skipping cancel call.")
+            return
+
+        # Log the explicit cancel call
+        logger.debug(
+            f"[{self.assignment.ticker}] -- EXECUTING cancelOrder for {order.order_type.value} order with id: "
+            f"{order.order_id}"
+        )
+        # Workaround for potential ibapi 9.81.1 bug: Pass a dummy object with the expected attribute
+        class DummyCancelTime:
+            manualOrderCancelTime = ""
+            extOperator = ""
+            externalUserId = ""
+            manualOrderIndicator = ""
+        self.tws_app.cancelOrder(order.order_id, DummyCancelTime())
+
+    def modify_order(self, order: MongerOrder, parent_trade: Optional[Trade] = None) -> None:
+        if not self.initialized:
+            raise RuntimeError("OrderExecutor must be initialized before modifying orders")
+
+        # Verify the order and submit it to our pool -- shoudl catch exceptions here
+        self.position.submit_order(order, parent_trade=parent_trade)
+        ib_order = order.ib_order
+        assert order.order_id is not None, "A valid order ID is required to modify an order."
+
+        logger.debug(
+            f"[{self.assignment.ticker}] -- Modifying {order.order_type.value} order with id: "
+            f"{order.order_id}"
+        )
+        self.tws_app.placeOrder(order.order_id, self.contract, ib_order)
+
+    def _place_take_profit(self) -> None:
+        """
+        Place take profit orders for each trade that needs one.
+        """
+        if not self.initialized:
+            raise RuntimeError("OrderExecutor must be initialized before placing orders")
+
+        for trade in self.position.trades.values():
+            if trade.size == 0:
+                continue
+
+            take_profit_size = trade.get_take_profit_size()
+            take_profit_price = trade.get_take_profit_price()
+
+            if trade.take_profit_order:
+                if take_profit_price is None or take_profit_size is None or self.is_emergency_exit:
+                    self.cancel_order(trade.take_profit_order)
+                    trade.clear_take_profit_order()
+                elif trade.take_profit_order.requires_update(take_profit_size, take_profit_price):
+                    trade.take_profit_order.size = take_profit_size
+                    trade.take_profit_order.limit_price = take_profit_price
+                    try:
+                        self.modify_order(trade.take_profit_order, parent_trade=trade)
+                    except CannotModifyFilledOrderError as e:
+                        logger.warning(
+                            f"Cannot modify TAKE PROFIT order for trade {trade.trade_id}: {str(e)}"
+                        )
+                        continue
+                    except StopLossCooldownIsActiveError:
+                        self.cancel_order(trade.take_profit_order)
+                        continue
+            else:
+                if take_profit_price and take_profit_size:
+                    try:
+                        self.place_order(
+                            order_type=OrderType.TAKE_PROFIT,
+                            order_action=self.position.exit_action,
+                            size=take_profit_size,
+                            price=take_profit_price,
+                            parent_trade=trade,
+                        )
+                    except StopLossCooldownIsActiveError:
+                        logger.warning(
+                            f"[{self.assignment.ticker}] -- Skipping placement of take profit "
+                            "order as stop loss cooldown is active."
+                        )
+
+    def _place_stop_loss(self) -> None:
+        """
+        Place stop loss orders for each trade that needs one.
+        """
+        if not self.initialized:
+            raise RuntimeError("OrderExecutor must be initialized before placing orders")
+
+        for trade in self.position.trades.values():
+            if trade.size == 0:
+                continue
+
+            stop_loss_size = trade.get_stop_loss_size()
+            stop_loss_price = trade.get_stop_loss_price(self.market_data)
+
+            if trade.stop_loss_order:
+                if stop_loss_price is None or stop_loss_size is None or self.is_emergency_exit:
+                    self.cancel_order(trade.stop_loss_order)
+                    trade.clear_stop_loss_order()
+                elif trade.stop_loss_order.requires_update(stop_loss_size, stop_loss_price):
+                    trade.stop_loss_order.size = stop_loss_size
+                    trade.stop_loss_order.limit_price = stop_loss_price
+
+                    if self.position.in_cooldown:
+                        self.cancel_order(trade.stop_loss_order)
+                        trade.clear_stop_loss_order()
+                    else:
+                        try:
+                            self.modify_order(trade.stop_loss_order, parent_trade=trade)
+                        except (CannotModifyFilledOrderError, StopLossCooldownIsActiveError) as e:
+                            logger.warning(
+                                f"Cannot modify STOP LOSS order for trade {trade.trade_id}: "
+                                f"{str(e)}"
+                            )
+                            continue
+
+            if stop_loss_price and stop_loss_size and not trade.stop_loss_order:
+                self.place_order(
+                    order_type=OrderType.STOP_LOSS,
+                    order_action=self.position.exit_action,
+                    size=stop_loss_size,
+                    price=stop_loss_price,
+                    parent_trade=trade,
+                )
+
+    def _dangling_shares_protocol(self) -> None:
+        """
+        Place an order to cancel out dangling shares.
+        """
+        if not self.initialized:
+            raise RuntimeError("OrderExecutor must be initialized before placing orders")
+
+        # Check if the mismatch still exists
+        if self.position.relevant_position_size == self.position.true_share_count:
+             # If mismatch resolved, check if there's an outstanding dangling order to cancel
+             if existing_order := self.position.dangling_shares_order:
+                 logger.info(f"[{self.assignment.ticker}] Mismatch resolved. Cancelling dangling shares order {existing_order.order_id}.")
+                 self.cancel_order(existing_order)
+             return
+
+        # Mismatch exists, calculate required order details for potential placement
+        delta = self.position.true_share_count - self.position.relevant_position_size
+        order_direction = OrderAction.BUY if delta < 0 else OrderAction.SELL
+        order_size = abs(delta)
+        price = self.market_data.order_book.get_exit_price(self.position.side)
+
+        # Check if a dangling shares order is already active
+        if existing_order := self.position.dangling_shares_order:
+            # Order exists. Check if it's older than 30 seconds.
+            now = datetime.now()
+            if (now - existing_order.created_at) > timedelta(seconds=30):
+                # Check if the order is still in a cancellable state internally
+                if existing_order.status in [OrderStatus.SUBMITTED, OrderStatus.PRE_SUBMITTED]:
+                    logger.info(f"[{self.assignment.ticker}] Dangling shares order {existing_order.order_id} (Status: {existing_order.status.value}) is unfilled and older than 30s. Attempting to cancel it.")
+                    self.cancel_order(existing_order)
+                else:
+                     logger.debug(f"[{self.assignment.ticker}] Dangling shares order {existing_order.order_id} is older than 30s but status is {existing_order.status.value}. Assuming already resolved or pending resolution. Waiting.")
+
+            else:
+                logger.debug(f"[{self.assignment.ticker}] Dangling shares order {existing_order.order_id} is active but younger than 30s. Waiting.")
+            return # Exit whether cancelled, waiting for status update, or too young. Let next cycle handle placement if needed.
+        else:
+            # No active order found in pool, place a new one
+            logger.info(f"[{self.assignment.ticker}] No active dangling order found. Placing new one: {order_direction.value} {order_size} @ {price}")
+            self.place_order(
+                order_type=OrderType.DANGLING_SHARES,
+                order_action=order_direction,
+                size=order_size,
+                price=price,
+            )
+
+    def _emergency_exit_protocol(self, final: bool = False) -> None:
+        """
+        Cancel all open orders.
+        """
+        if not self.initialized:
+            raise RuntimeError("OrderExecutor must be initialized before placing orders")
+        self.tws_app.is_active = False
+
+        # Ensure all open orders are cancelled
+        for order_id in self.position.open_orders:
+            order = self.position.pool[order_id]
+            if order.order_type != OrderType.EMERGENCY_EXIT:
+                self.cancel_order(order)
+
+        logger.debug(
+            f"({self.assignment.ticker}) current shares remaining: {self.position.true_share_count}"
+        )
+        if self.position.true_share_count == 0:
+            logger.debug("test emerg exit -- share count 0")
+            # Pass through the emergency exit protocol again to ensure that we have no open orderes
+            if not final:
+                logger.debug("test emerg exit -- not final")
+                return self._emergency_exit_protocol(final=True)
+
+            logger.debug("test emerg exit -- final")
+            self.is_emergency_exit = False
+            self.tws_app.stop(skip_emerg=True)
+            return
+
+        self.is_emergency_exit = True
+
+        # Ensure that we have an emergency exit order in place for the entire
+        # position size
+        exit_size = abs(self.position.true_share_count)
+        if emergency_exit_order := self.position.emergency_exit_order:
+            if emergency_exit_order.requires_update(exit_size, self.market_data.last):
+                emergency_exit_order.size = exit_size
+                emergency_exit_order.limit_price = self.market_data.last
+                try:
+                    self.modify_order(emergency_exit_order)
+                except CannotModifyFilledOrderError as e:
+                    logger.warning(f"Cannot modify EMERGENCY EXIT order: {str(e)}")
+                    self.cancel_order(emergency_exit_order)
+        else:
+            # Determine action based on actual TWS position count
+            if self.position.true_share_count == 0: # Should not happen if check above passed, but safety first
+                 logger.warning(f"[{self.assignment.ticker}] Attempting emergency exit but true_share_count is already 0. Skipping order placement.")
+                 return 
+            emergency_action = OrderAction.SELL if self.position.true_share_count > 0 else OrderAction.BUY
+            self.place_order(
+                order_type=OrderType.EMERGENCY_EXIT,
+                order_action=emergency_action, # Use calculated action
+                size=exit_size,
+                price=self.market_data.last,
+            )

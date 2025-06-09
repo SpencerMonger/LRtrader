@@ -1,0 +1,40 @@
+executions:
+  AMD:
+    ticker: AMD
+    bearish_lower_bound: 0.8
+    bearish_upper_bound: 1
+    bullish_lower_bound: 0.6
+    bullish_upper_bound: 0.75
+    unit_position_size: 500
+    max_position_size: 1500
+    trade_threshold: 60
+    max_hold_time: 900
+    take_profit_target: 1.1
+    stop_loss_target: 9
+    stop_loss_strat: STATIC
+    spread_strategy: BEST
+    spread_offset: 0
+
+  TSLA:
+    ticker: TSLA
+    bearish_lower_bound: 0.8
+    bearish_upper_bound: 1
+    bullish_lower_bound: 0.6
+    bullish_upper_bound: 0.75
+    unit_position_size: 175
+    max_position_size: 525
+    trade_threshold: 60
+    max_hold_time: 900
+    take_profit_target: 3
+    stop_loss_target: 9
+    stop_loss_strat: STATIC
+    spread_strategy: BEST
+    spread_offset: 0
+
+position:
+  max_loss_per_trade: 7600
+  max_loss_cumulative: 7600
+  clip_activation: 8000
+  clip_stop_loss: 2000
+
+model_name: lisa_v0.1
