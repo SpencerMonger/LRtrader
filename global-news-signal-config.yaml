@@ -18,7 +18,7 @@ global_defaults:
   unit_position_size: 1000           # Default position size for all tickers
   max_position_size: 3000            # Maximum position size for all tickers
   trade_threshold: 180              # Seconds between trades
-  max_hold_time: 900                # Maximum hold time in seconds
+  max_hold_time: 7200              # Maximum hold time in seconds
   take_profit_target: 0.99         # Take profit target (0.2%)
   stop_loss_target: 0.10           # Stop loss target (0.5%)
   stop_loss_strat: STATIC           # Stop loss strategy

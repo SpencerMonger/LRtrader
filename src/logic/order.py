@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 from ibapi.contract import Contract as IBContract
 from loguru import logger
 
-from error import (
+from src.error import (
     CannotModifyFilledOrderError,
     InvalidExecutionError,
     OrderDoesNotExistError,
@@ -249,9 +249,9 @@ class OrderStatusMixin(AbstractOrderExecutorMixin):
             original_size = order_in_pool.size
             original_limit_price = order_in_pool.limit_price
         except OrderDoesNotExistError:
-            logger.warning(
-                f"FILLED PRE-CHECK [{self.assignment.ticker}] -- "
-                f"Order ID {order_id} not found in position pool. Cannot process fill."
+            logger.debug(
+                f"FILLED DUPLICATE [{self.assignment.ticker}] -- "
+                f"Order ID {order_id} not found in position pool. Likely already processed."
             )
             return
         # --- End Get order details ---
@@ -260,10 +260,10 @@ class OrderStatusMixin(AbstractOrderExecutorMixin):
             # This call updates Position state and removes the order from the pool
             filled_order = self.position.handle_filled(order_id, filled, avg_fill_price)
         except OrderDoesNotExistError:
-            # This case should ideally not happen if the pre-check passed, but log just in case
-            logger.warning(
-                f"FILLED POST-CHECK [{self.assignment.ticker}] -- "
-                f"Order ID {order_id} was not in position pool after attempting handle_filled."
+            # This case indicates the order was already processed between the pre-check and this call
+            logger.debug(
+                f"FILLED RACE CONDITION [{self.assignment.ticker}] -- "
+                f"Order ID {order_id} was removed from pool between pre-check and handle_filled. Already processed."
             )
             return
 
