@@ -28,7 +28,7 @@ from schema import TraderAssignment
 
 # Use correct imports from schema
 from src.schema.prediction import PriceDirection, Prediction # Import enum and Prediction model
-from predictions.prediction_signals import ClickhouseSignalProvider # Keep provider import
+from predictions.composite_signal_provider import CompositeSignalProvider # Import CompositeSignalProvider
 
 if TYPE_CHECKING:
     from portfolio_app import PortfolioManager # Ensure this import is present
@@ -50,7 +50,7 @@ class TradeMonger(MongerWrapper, MongerClient):
 
     """
 
-    def __init__(self, assignment: TraderAssignment, account_id: str, signal_provider: ClickhouseSignalProvider, portfolio_manager: "PortfolioManager"):
+    def __init__(self, assignment: TraderAssignment, account_id: str, signal_provider: CompositeSignalProvider, portfolio_manager: "PortfolioManager"):
         # Pass portfolio_manager to MongerWrapper superclass
         MongerWrapper.__init__(self, assignment=assignment, portfolio_manager=portfolio_manager)
         MongerClient.__init__(self, wrapper=self)
@@ -172,7 +172,7 @@ class TradeMonger(MongerWrapper, MongerClient):
 
     # Replaced inference_loop with signal_check_loop
     async def signal_check_loop(self):
-        logger.debug(f"{self.ticker} -- Starting ClickHouse signal check loop")
+        logger.debug(f"{self.ticker} -- Starting signal check loop")
         last_signal_time = None
         try:
             while not self.stop_event.is_set():
@@ -197,16 +197,17 @@ class TradeMonger(MongerWrapper, MongerClient):
                     # Get the current flag and timestamp
                     current_flag = signal_data['flag']
                     current_signal_time = signal_data.get('timestamp')
+                    signal_source = signal_data.get('source', 'unknown')
 
                     # Log values before comparison
-                    logger.debug(f"[{self.ticker}] Checking signal: Current Time={current_signal_time}, Last Processed Time={last_signal_time}")
+                    logger.debug(f"[{self.ticker}] Checking signal: Current Time={current_signal_time}, Last Processed Time={last_signal_time}, Source={signal_source}")
                     # Only process if the timestamp is newer than the last processed one
                     if last_signal_time is None or current_signal_time > last_signal_time:
                         # Log that check passed
                         logger.debug(f"[{self.ticker}] Signal timestamp is new. Proceeding...")
                         logger.info(
                             f"SIGNAL -- {self.ticker}: "
-                            f"{current_flag} (From ClickHouse @ {current_signal_time})"
+                            f"{current_flag} (From {signal_source} @ {current_signal_time})"
                         )
                         # Create an actual Prediction object
                         prediction = Prediction(

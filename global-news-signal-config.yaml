@@ -1,0 +1,60 @@
+# Global News Signal Configuration
+# This configuration enables dynamic trading on ANY ticker discovered in news alerts
+# No predefined executions needed - global defaults applied to all discovered tickers
+
+# Signal strategy configuration - Controls which signal providers to use
+signal_strategy:
+  enable_predictions: false         # Disable traditional prediction signals
+  enable_news_alerts: true          # Enable news alert signals from News.news_alert table
+  news_alert_lookback_minutes: 3    # Minutes to look back for unique ticker detection
+  enable_dynamic_discovery: true    # Enable dynamic ticker discovery from news alerts
+
+# Global trading defaults - Applied to ALL tickers discovered via news alerts
+global_defaults:
+  bearish_lower_bound: 1.0
+  bearish_upper_bound: 1.01
+  bullish_lower_bound: 0.0
+  bullish_upper_bound: 1.01
+  unit_position_size: 1000           # Default position size for all tickers
+  max_position_size: 3000            # Maximum position size for all tickers
+  trade_threshold: 180              # Seconds between trades
+  max_hold_time: 900                # Maximum hold time in seconds
+  take_profit_target: 0.99         # Take profit target (0.2%)
+  stop_loss_target: 0.10           # Stop loss target (0.5%)
+  stop_loss_strat: STATIC           # Stop loss strategy
+  spread_strategy: WORST             # Spread strategy
+  spread_offset: 0                  # Spread offset
+  inverted: regular                 # Default signal inversion
+
+# Position-wide risk management settings
+position:
+  max_loss_per_trade: 7600          # Maximum loss per trade
+  max_loss_cumulative: 7600         # Maximum cumulative loss
+  clip_activation: 8000             # Clip activation level
+  clip_stop_loss: 2000             # Clip stop loss level
+
+# Ticker-specific overrides (optional)
+# Use this section to customize parameters for specific tickers
+ticker_overrides:
+  TSLA:
+    unit_position_size: 100         # Smaller position for volatile stocks
+    max_position_size: 300
+    take_profit_target: 0.001       # Tighter take profit for TSLA
+    stop_loss_target: 0.003         # Tighter stop loss for TSLA
+  
+  AAPL:
+    unit_position_size: 500         # Larger position for stable stocks
+    max_position_size: 1500
+  
+  # Add more ticker-specific overrides as needed
+  # Any ticker NOT listed here will use the global_defaults
+
+# Model name for tracking
+model_name: news_alert_dynamic_v1.0
+
+# Dynamic ticker discovery settings
+dynamic_settings:
+  max_concurrent_tickers: 50        # Maximum number of concurrent tickers to trade
+  ticker_timeout_minutes: 60        # Remove inactive tickers after this time
+  enable_contract_validation: true  # Validate contracts via IBKR API before trading
+  client_id_range_start: 10000000   # Starting range for dynamic client IDs 

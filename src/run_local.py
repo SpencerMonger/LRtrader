@@ -47,16 +47,35 @@ async def main() -> None:
 
     try:
         assignments = AssignmentFactory.create_assignments(args.config)
-        if not assignments:
+        
+        # Check if this is a global configuration with dynamic discovery
+        config = AssignmentFactory.load_config(args.config)
+        is_global_config = "global_defaults" in config
+        signal_config = AssignmentFactory.create_signal_config(args.config)
+        
+        if is_global_config and signal_config.enable_dynamic_discovery:
+            # For global configs with dynamic discovery, assignments start empty
+            # Traders will be created dynamically when signals appear
+            logger.info("Using global configuration with dynamic ticker discovery")
+            logger.info("Starting with empty assignments - traders will be created dynamically from news alerts")
+            if not assignments:
+                assignments = []  # Start with empty list for dynamic discovery
+        elif not assignments:
             logger.error("No valid assignments found in config file")
             return
 
-        logger.info(f"Loaded {len(assignments)} assignments from config")
+        logger.info(f"Loaded {len(assignments)} static assignments from config")
         for assignment in assignments:
             logger.info(f"Configured trader for {assignment.ticker}")
 
+        # Pass the config path to the manager for signal configuration
         manager = MongerManager(
-            assignments, args.account, host=args.host, port=args.port, max_pnl=-50000
+            assignments, 
+            args.account, 
+            config_path=args.config,  # Pass config path for signal configuration
+            host=args.host, 
+            port=args.port, 
+            max_pnl=-50000
         )
 
         def signal_handler(signum, frame):

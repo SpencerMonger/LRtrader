@@ -11,8 +11,8 @@ from loguru import logger
 
 from app import TradeMonger
 from portfolio_app import PortfolioManager
-from schema.assignment import TraderAssignment
-from predictions.prediction_signals import ClickhouseSignalProvider
+from schema.assignment import TraderAssignment, AssignmentFactory
+from predictions.composite_signal_provider import CompositeSignalProvider
 
 
 class MongerManager:
@@ -31,6 +31,7 @@ class MongerManager:
         self,
         assignments: List[TraderAssignment],
         account: str,
+        config_path: str = None,
         max_pnl: float = 1000,
         max_workers: int = 10,
         host: str = "127.0.0.1",
@@ -40,9 +41,11 @@ class MongerManager:
         Initialize the MongerManager with trader assignments and a thread pool executor.
 
         :param List[TraderAssignment] assignments: List of trader assignments to manage.
+        :param str config_path: Path to configuration file for signal settings.
         :param int max_workers: Maximum number of worker threads.
         """
         self.assignments = assignments
+        self.config_path = config_path
         self.executor = ThreadPoolExecutor(max_workers=max_workers)
         self.mongers: List[TradeMonger] = []
         self.running: bool = False
@@ -57,13 +60,57 @@ class MongerManager:
             for a in assignments
         ]
         
-        # Initialize the signal provider
-        self.signal_provider = ClickhouseSignalProvider(ticker_configs=ticker_configs)
+        # Create signal configuration from config file
+        signal_config_dict = {}
+        if self.config_path:
+            try:
+                signal_config = AssignmentFactory.create_signal_config(self.config_path)
+                signal_config_dict = {
+                    'enable_predictions': signal_config.enable_predictions,
+                    'enable_news_alerts': signal_config.enable_news_alerts,
+                    'news_alert_lookback_minutes': signal_config.news_alert_lookback_minutes,
+                    'enable_dynamic_discovery': signal_config.enable_dynamic_discovery
+                }
+                logger.info(f"Loaded signal config from {self.config_path}")
+            except Exception as e:
+                logger.error(f"Failed to load signal config from {self.config_path}: {e}")
+                # Use default config for backward compatibility
+                signal_config_dict = {
+                    'enable_predictions': True,
+                    'enable_news_alerts': False,
+                    'news_alert_lookback_minutes': 3,
+                    'enable_dynamic_discovery': False
+                }
+        else:
+            # Default configuration for backward compatibility
+            signal_config_dict = {
+                'enable_predictions': True,
+                'enable_news_alerts': False,
+                'news_alert_lookback_minutes': 3,
+                'enable_dynamic_discovery': False
+            }
+        
+        # Initialize the composite signal provider
+        try:
+            self.signal_provider = CompositeSignalProvider(
+                ticker_configs=ticker_configs,
+                signal_config=signal_config_dict
+            )
+            
+            # Set up callback for dynamic ticker discovery
+            self.signal_provider.set_new_ticker_callback(self._handle_new_ticker)
+            
+            logger.info("Initialized CompositeSignalProvider")
+        except Exception as e:
+            logger.error(f"Failed to initialize CompositeSignalProvider: {e}")
+            # Fall back to a basic provider if needed
+            raise
         
         # Initialize PortfolioManager FIRST, passing the empty mongers list
         self.portfolio_manager = PortfolioManager(
             account, self.mongers, max_pnl=max_pnl, cancel_func=self.stop
         )
+        
         # Now, initialize TradeMonger instances, passing the portfolio_manager reference
         for assignment in self.assignments:
             try:
@@ -99,25 +146,34 @@ class MongerManager:
         # Start the signal provider polling
         try:
             self.signal_provider.start_polling()
+            
+            # Log the status of all signal providers
+            provider_status = self.signal_provider.get_provider_status()
+            for provider_name, status in provider_status.items():
+                if status.get('initialized', False):
+                    logger.info(f"Started {provider_name} signal provider")
+                else:
+                    logger.warning(f"Failed to start {provider_name} signal provider: {status.get('error', 'Unknown error')}")
+                    
         except Exception as e:
-            logger.error(f"Failed to start ClickHouse Signal Provider: {e}")
+            logger.error(f"Failed to start signal providers: {e}")
             # Decide if we should proceed without signals or stop
             # For now, let's log the error and continue, but mongers will fail
             # unless TradeMonger is updated to handle a missing provider.
             # Consider adding `return` here if signals are essential.
 
         async with anyio.create_task_group() as tg:
-            # Iterate through the already initialized self.mongers
-            for monger in self.mongers:
+            # Start existing mongers
+            for monger in self.mongers[:]:  # Use slice copy to avoid modification during iteration
                 if auto_activate:
                     monger.set_active(True)
                 # Find the corresponding assignment to get the client_id
-                # This assumes assignment order matches monger order, which should be true based on init
                 assignment = next((a for a in self.assignments if a.ticker == monger.ticker), None)
                 if assignment:
                     tg.start_soon(self.run_monger, monger, assignment.client_id)
                 else:
-                    logger.error(f"Could not find assignment for monger {monger.ticker} during start")
+                    # This could be a dynamic trader - use its assignment's client_id
+                    tg.start_soon(self.run_monger, monger, monger.assignment.client_id)
             
             # Start the portfolio manager loop
             try:
@@ -127,10 +183,59 @@ class MongerManager:
 
                 traceback.print_exc()
                 logger.error("Error creating portfolio manager.")
+                
+            # Start dynamic trader management loop
+            tg.start_soon(self._dynamic_trader_manager)
         
         # Wait here until stop() is called
         await self._stopped_event.wait()
         logger.info("Manager start method completed after stop signal.")
+
+    async def _dynamic_trader_manager(self) -> None:
+        """
+        Continuously monitors for new dynamic traders and starts them.
+        """
+        logger.info("Starting dynamic trader manager")
+        started_mongers = set()
+        
+        while self.running:
+            try:
+                # Check for new mongers that need to be started
+                for monger in self.mongers:
+                    # Check if this is a dynamic trader that hasn't been started yet
+                    if (monger.assignment.dynamic_client_id is not None and 
+                        monger.ticker not in started_mongers and 
+                        monger.is_active):
+                        
+                        # Start this dynamic trader
+                        client_id = monger.assignment.client_id
+                        logger.info(f"🚀 Starting dynamic trader for {monger.ticker} with client ID {client_id}")
+                        
+                        # Connect and run the monger
+                        try:
+                            monger.connect(self.host, self.port, clientId=client_id)
+                            # Start in background thread
+                            import threading
+                            trader_thread = threading.Thread(
+                                target=monger.run,
+                                daemon=True,
+                                name=f"DynamicTrader-{monger.ticker}"
+                            )
+                            trader_thread.start()
+                            started_mongers.add(monger.ticker)
+                            logger.info(f"✅ Dynamic trader for {monger.ticker} started successfully")
+                            
+                        except Exception as e:
+                            logger.error(f"Failed to start dynamic trader for {monger.ticker}: {e}")
+                
+                # Sleep for a short time before checking again
+                await anyio.sleep(1.0)
+                
+            except Exception as e:
+                logger.error(f"Error in dynamic trader manager: {e}")
+                await anyio.sleep(5.0)  # Wait longer on error
+        
+        logger.info("Dynamic trader manager stopped")
 
     async def run_monger(self, monger: TradeMonger, client_id: int) -> None:
         try:
@@ -182,3 +287,107 @@ class MongerManager:
         logger.debug("Shutting down executor")
         await anyio.to_thread.run_sync(self.executor.shutdown)
         logger.info("All mongers stopped successfully")
+
+    def get_signal_summary(self) -> dict:
+        """Get a summary of all signal providers for monitoring."""
+        try:
+            return self.signal_provider.get_signal_summary()
+        except Exception as e:
+            logger.error(f"Error getting signal summary: {e}")
+            return {}
+
+    def get_provider_status(self) -> dict:
+        """Get the status of all signal providers."""
+        try:
+            return self.signal_provider.get_provider_status()
+        except Exception as e:
+            logger.error(f"Error getting provider status: {e}")
+            return {}
+
+    def _handle_new_ticker(self, ticker: str) -> None:
+        """
+        Handle discovery of a new ticker from news alerts by creating a dynamic trader.
+        
+        :param ticker: The ticker symbol that was discovered
+        """
+        try:
+            # Check if we already have a trader for this ticker
+            existing_trader = next((m for m in self.mongers if m.ticker == ticker), None)
+            if existing_trader:
+                logger.debug(f"Trader for {ticker} already exists, skipping creation")
+                return
+            
+            # Check if this is a global configuration that supports dynamic creation
+            if not self.config_path:
+                logger.warning(f"Cannot create dynamic trader for {ticker} - no config path available")
+                return
+                
+            try:
+                config = AssignmentFactory.load_config(self.config_path)
+                if "global_defaults" not in config:
+                    logger.warning(f"Cannot create dynamic trader for {ticker} - no global_defaults in config")
+                    return
+                
+                # Generate dynamic client ID for the new ticker
+                client_id = self._generate_dynamic_client_id(ticker)
+                
+                # Create dynamic assignment using global defaults
+                dynamic_assignment = AssignmentFactory.create_dynamic_assignment(ticker, self.config_path, client_id)
+                
+                # Create new TradeMonger instance
+                monger = TradeMonger(
+                    assignment=dynamic_assignment,
+                    account_id=self.account,
+                    signal_provider=self.signal_provider,
+                    portfolio_manager=self.portfolio_manager
+                )
+                
+                # Add to our mongers list
+                self.mongers.append(monger)
+                
+                # Start the new monger in a separate task if manager is running
+                if self.running:
+                    import anyio
+                    # We need to start this in the event loop
+                    logger.info(f"🚀 Starting dynamic trader for {ticker} with client ID {client_id}")
+                    # Note: We'll need to handle this differently since we're not in async context
+                    # For now, mark it as active and it will start on next cycle
+                    monger.set_active(True)
+                    
+                    # Store client_id for connection (assignment already has it)
+                    # No need to store separately since it's in the assignment
+                
+                logger.info(f"✅ Created dynamic trader for {ticker} using global defaults")
+                
+            except Exception as e:
+                logger.error(f"Failed to create dynamic assignment for {ticker}: {e}")
+                
+        except Exception as e:
+            logger.error(f"Error in _handle_new_ticker for {ticker}: {e}")
+            
+    def _generate_dynamic_client_id(self, ticker: str) -> int:
+        """
+        Generate a unique client ID for a dynamic ticker.
+        
+        :param ticker: The ticker symbol
+        :return: Unique client ID
+        """
+        # Use hash-based generation starting from 10M range to avoid conflicts
+        base_hash = abs(hash(ticker)) % 1000000
+        client_id = 10000000 + base_hash
+        
+        # Check for conflicts with existing traders
+        existing_client_ids = set()
+        for assignment in self.assignments:
+            existing_client_ids.add(assignment.client_id)
+        for monger in self.mongers:
+            existing_client_ids.add(monger.assignment.client_id)
+        
+        # Handle collisions by incrementing
+        while client_id in existing_client_ids:
+            client_id += 1
+            if client_id > 11000000:  # Safety limit
+                raise ValueError(f"Cannot generate unique client ID for {ticker}")
+        
+        logger.info(f"Generated dynamic client ID {client_id} for {ticker}")
+        return client_id

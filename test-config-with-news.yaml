@@ -1,0 +1,138 @@
+# Configuration for Monger Trading Algorithm with News Alert Signals
+# This configuration demonstrates how to enable both prediction signals and news alert signals
+
+# Signal strategy configuration - NEW SECTION for signal providers
+signal_strategy:
+  enable_predictions: true          # Enable traditional ClickHouse prediction signals
+  enable_news_alerts: true          # Enable news alert signals from News.news_alert table
+  news_alert_lookback_minutes: 3    # Minutes to look back for unique ticker detection
+
+executions:
+  AAPL:
+    ticker: AAPL
+    bearish_lower_bound: 1.0
+    bearish_upper_bound: 1.01
+    bullish_lower_bound: 0.0
+    bullish_upper_bound: 1.01
+    unit_position_size: 250
+    max_position_size: 750
+    trade_threshold: 180
+    max_hold_time: 900
+    take_profit_target: 0.002
+    stop_loss_target: 0.005
+    stop_loss_strat: STATIC
+    spread_strategy: BEST
+    spread_offset: 0
+    inverted: regular
+
+  AMZN:
+    ticker: AMZN
+    bearish_lower_bound: 1.0
+    bearish_upper_bound: 1.01
+    bullish_lower_bound: 0.0
+    bullish_upper_bound: 1.01
+    unit_position_size: 250
+    max_position_size: 750
+    trade_threshold: 180
+    max_hold_time: 900
+    take_profit_target: 0.002
+    stop_loss_target: 0.005
+    stop_loss_strat: STATIC
+    spread_strategy: BEST
+    spread_offset: 0
+    inverted: regular
+
+  META:
+    ticker: META
+    bearish_lower_bound: 1.0
+    bearish_upper_bound: 1.01
+    bullish_lower_bound: 0.0
+    bullish_upper_bound: 1.01
+    unit_position_size: 100
+    max_position_size: 300
+    trade_threshold: 180
+    max_hold_time: 900
+    take_profit_target: 0.002
+    stop_loss_target: 0.005
+    stop_loss_strat: STATIC
+    spread_strategy: BEST
+    spread_offset: 0
+    inverted: regular
+
+  MSFT:
+    ticker: MSFT
+    bearish_lower_bound: 1.0
+    bearish_upper_bound: 1.01
+    bullish_lower_bound: 0.0
+    bullish_upper_bound: 1.01
+    unit_position_size: 100
+    max_position_size: 300
+    trade_threshold: 180
+    max_hold_time: 900
+    take_profit_target: 0.002
+    stop_loss_target: 0.005
+    stop_loss_strat: STATIC
+    spread_strategy: BEST
+    spread_offset: 0
+    inverted: regular
+
+  GOOG:
+    ticker: GOOG
+    bearish_lower_bound: 1.0
+    bearish_upper_bound: 1.01
+    bullish_lower_bound: 0.0
+    bullish_upper_bound: 1.01
+    unit_position_size: 250
+    max_position_size: 750
+    trade_threshold: 180
+    max_hold_time: 900
+    take_profit_target: 0.002
+    stop_loss_target: 0.005
+    stop_loss_strat: STATIC
+    spread_strategy: BEST
+    spread_offset: 0
+    inverted: regular
+
+  AMD:
+    ticker: AMD
+    bearish_lower_bound: 1.0
+    bearish_upper_bound: 1.01
+    bullish_lower_bound: 0.0
+    bullish_upper_bound: 1.01
+    unit_position_size: 250
+    max_position_size: 750
+    trade_threshold: 180
+    max_hold_time: 900
+    take_profit_target: 0.002
+    stop_loss_target: 0.005
+    stop_loss_strat: STATIC
+    spread_strategy: BEST
+    spread_offset: 0
+    inverted: regular
+
+  TSLA:
+    ticker: TSLA
+    bearish_lower_bound: 1.0
+    bearish_upper_bound: 1.01
+    bullish_lower_bound: 0.0
+    bullish_upper_bound: 1.01
+    unit_position_size: 250
+    max_position_size: 750
+    trade_threshold: 180
+    max_hold_time: 900
+    take_profit_target: 0.002
+    stop_loss_target: 0.005
+    stop_loss_strat: STATIC
+    spread_strategy: BEST
+    spread_offset: 0
+    inverted: regular
+
+# Position block defined ONCE at the top level
+position:
+  max_loss_per_trade: 7600
+  max_loss_cumulative: 7600
+  clip_activation: 8000
+  clip_stop_loss: 2000
+
+# Model name defined ONCE at the top level
+model_name: lisa_v0.1 

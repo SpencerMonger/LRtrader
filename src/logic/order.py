@@ -459,8 +459,10 @@ class TraderMixin(AbstractOrderExecutorMixin):
             delta_to_max = max_position_size - self.position.size
             position_size = min(delta_to_max, self.assignment.position_size)
 
-            entry_price = self.market_data.order_book.get_entry_price(prediction.flag)
-            logger.debug(f"[{self.assignment.ticker}] Calculated Entry: Size={position_size}, Price={entry_price}")
+            # Determine spread strategy: BEST = True, WORST = False
+            best_spread = self.assignment.spread_strategy.upper() == "BEST"
+            entry_price = self.market_data.order_book.get_entry_price(prediction.flag, best_spread)
+            logger.debug(f"[{self.assignment.ticker}] Calculated Entry: Size={position_size}, Price={entry_price}, Strategy={self.assignment.spread_strategy}")
 
             if position_size == 0:
                 logger.debug(f"[{self.assignment.ticker}] Position size is 0, skipping order placement.")
@@ -491,7 +493,9 @@ class TraderMixin(AbstractOrderExecutorMixin):
                 if self.position.trade_to_close.exit_order:
                     return
 
-                exit_price = self.market_data.order_book.get_exit_price(self.position.side)
+                # Determine spread strategy: BEST = True, WORST = False
+                best_spread = self.assignment.spread_strategy.upper() == "BEST"
+                exit_price = self.market_data.order_book.get_exit_price(self.position.side, best_spread)
 
                 self.place_order(
                     order_type=OrderType.EXIT,
@@ -831,7 +835,9 @@ class OrderExecutor(OrderStatusMixin, MarketDataMixin, TraderMixin):
         delta = self.position.true_share_count - self.position.relevant_position_size
         order_direction = OrderAction.BUY if delta < 0 else OrderAction.SELL
         order_size = abs(delta)
-        price = self.market_data.order_book.get_exit_price(self.position.side)
+        # Determine spread strategy: BEST = True, WORST = False
+        best_spread = self.assignment.spread_strategy.upper() == "BEST"
+        price = self.market_data.order_book.get_exit_price(self.position.side, best_spread)
 
         # Check if a dangling shares order is already active
         if existing_order := self.position.dangling_shares_order:

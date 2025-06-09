@@ -5,7 +5,7 @@ from ibapi.order import Order as IBOrder
 from pydantic import BaseModel, Field, computed_field
 import pytz
 
-from error import CannotModifyFilledOrderError, InvalidExecutionError, OrderDoesNotExistError
+from src.error import CannotModifyFilledOrderError, InvalidExecutionError, OrderDoesNotExistError
 
 from .enums import OrderAction, OrderStatus, OrderType
 
@@ -52,7 +52,7 @@ class MongerOrder(BaseModel):
             case OrderType.EXIT:
                 return "LMT"
             case OrderType.EMERGENCY_EXIT:
-                return "LMT"
+                return "MKT"
             case OrderType.DANGLING_SHARES:
                 return "LMT"
 
@@ -83,7 +83,10 @@ class MongerOrder(BaseModel):
         ib_order.action = self.action.value
         ib_order.orderType = self.ib_order_type
         ib_order.totalQuantity = int(self.size)
-        ib_order.lmtPrice = round(self.limit_price, 2)
+        
+        # Only set limit price for non-market orders
+        if self.ib_order_type != "MKT":
+            ib_order.lmtPrice = round(self.limit_price, 2)
 
         # Explicitly set etradeOnly to False to avoid default issues
         ib_order.etradeOnly = False
