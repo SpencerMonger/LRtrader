@@ -9,14 +9,39 @@ signal_strategy:
   news_alert_lookback_minutes: 3    # Minutes to look back for unique ticker detection
   enable_dynamic_discovery: true    # Enable dynamic ticker discovery from news alerts
 
+# Price-based position sizing tier list
+# Position sizes are determined by the stock price at the moment of signal detection
+tier_list:
+  - price_min: 0.01
+    price_max: 1.00
+    unit_position_size: 8000
+    max_position_size: 24000
+  - price_min: 1.00
+    price_max: 3.00
+    unit_position_size: 6000
+    max_position_size: 18000
+  - price_min: 3.00
+    price_max: 5.00
+    unit_position_size: 5000
+    max_position_size: 15000
+  - price_min: 5.00
+    price_max: 8.00
+    unit_position_size: 2500
+    max_position_size: 7500
+  - price_min: 8.00
+    price_max: 999999.99  # Effective maximum for stocks over $8
+    unit_position_size: 1000
+    max_position_size: 3000
+
 # Global trading defaults - Applied to ALL tickers discovered via news alerts
+# These values are used as fallback when price information is not available
 global_defaults:
   bearish_lower_bound: 1.0
   bearish_upper_bound: 1.01
   bullish_lower_bound: 0.0
   bullish_upper_bound: 1.01
-  unit_position_size: 1000           # Default position size for all tickers
-  max_position_size: 3000            # Maximum position size for all tickers
+  unit_position_size: 1000           # Default position size for all tickers (fallback)
+  max_position_size: 3000            # Maximum position size for all tickers (fallback)
   trade_threshold: 180              # Seconds between trades
   max_hold_time: 7200              # Maximum hold time in seconds
   take_profit_target: 0.99         # Take profit target (0.2%)
@@ -35,6 +60,7 @@ position:
 
 # Ticker-specific overrides (optional)
 # Use this section to customize parameters for specific tickers
+# Note: These will override tier-based position sizing
 ticker_overrides:
   TSLA:
     unit_position_size: 100         # Smaller position for volatile stocks
@@ -47,7 +73,7 @@ ticker_overrides:
     max_position_size: 1500
   
   # Add more ticker-specific overrides as needed
-  # Any ticker NOT listed here will use the global_defaults
+  # Any ticker NOT listed here will use tier-based position sizing
 
 # Model name for tracking
 model_name: news_alert_dynamic_v1.0

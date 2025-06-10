@@ -54,7 +54,7 @@ class CompositeSignalProvider:
         self._initialize_providers()
         
         # Callback for new ticker discovery
-        self._new_ticker_callback: Optional[Callable[[str], None]] = None
+        self._new_ticker_callback: Optional[Callable[[str, float], None]] = None
 
     def _initialize_providers(self):
         """Initialize signal providers based on configuration."""
@@ -142,11 +142,12 @@ class CompositeSignalProvider:
         logger.debug(f"Returning {provider_name} signal for {ticker}: {signal['flag']}")
         return enhanced_signal
 
-    def set_new_ticker_callback(self, callback: Callable[[str], None]) -> None:
+    def set_new_ticker_callback(self, callback: Callable[[str, float], None]) -> None:
         """
         Set callback for when new tickers are discovered by any provider.
         
-        :param callback: Function to call when a new ticker is found
+        :param callback: Function to call when a new ticker is found.
+                        Receives (ticker: str, price: float) where price may be None.
         """
         self._new_ticker_callback = callback
         

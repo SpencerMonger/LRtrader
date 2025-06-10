@@ -58,6 +58,42 @@ class DynamicSettings(BaseModel):
     client_id_range_start: int = Field(10000000, description="Starting range for dynamic client IDs")
 
 
+class TierListEntry(BaseModel):
+    """Individual tier entry for price-based position sizing."""
+    
+    price_min: float = Field(description="Minimum price for this tier (inclusive)")
+    price_max: float = Field(description="Maximum price for this tier (exclusive)")
+    unit_position_size: int = Field(description="Position size for this price tier")
+    max_position_size: int = Field(description="Maximum position size for this price tier")
+
+    def contains_price(self, price: float) -> bool:
+        """Check if a price falls within this tier."""
+        return self.price_min <= price < self.price_max
+
+
+class TierList(BaseModel):
+    """Price-based position sizing configuration."""
+    
+    tiers: List[TierListEntry] = Field(default_factory=list, description="List of price tiers")
+    
+    def get_position_size_for_price(self, price: float) -> Dict[str, int]:
+        """
+        Get position sizes for a given price.
+        
+        :param price: Stock price
+        :return: Dictionary with 'unit_position_size' and 'max_position_size'
+        """
+        for tier in self.tiers:
+            if tier.contains_price(price):
+                return {
+                    'unit_position_size': tier.unit_position_size,
+                    'max_position_size': tier.max_position_size
+                }
+        
+        # Return empty dict if no tier matches (fallback to global defaults)
+        return {}
+
+
 class GlobalDefaults(BaseModel):
     """Global default trading parameters for dynamic tickers."""
     
@@ -254,7 +290,7 @@ class AssignmentFactory:
             return SignalConfig()
 
     @classmethod
-    def create_dynamic_assignment(cls, ticker: str, config_path: str | Path, client_id: int = None) -> TraderAssignment:
+    def create_dynamic_assignment(cls, ticker: str, config_path: str | Path, client_id: int = None, price: float = None) -> TraderAssignment:
         """Create a TraderAssignment for a dynamically discovered ticker using global defaults."""
         config = cls.load_config(config_path)
         
@@ -269,8 +305,20 @@ class AssignmentFactory:
         # Apply ticker-specific overrides if they exist
         ticker_overrides = config.get("ticker_overrides", {}).get(ticker, {})
         
-        # Merge: global_defaults -> position_config -> ticker_overrides
-        assignment_config = {**global_defaults, **position_config, **ticker_overrides}
+        # If ticker has specific overrides, use them as-is (they take precedence over tier list)
+        if ticker_overrides:
+            logger.info(f"Using ticker-specific overrides for {ticker} (ignoring tier list)")
+            assignment_config = {**global_defaults, **position_config, **ticker_overrides}
+        else:
+            # Use tier-based position sizing if price is available and tier list exists
+            tier_based_config = cls._get_tier_based_position_sizing(config, price)
+            if tier_based_config:
+                logger.info(f"Using tier-based position sizing for {ticker} at ${price:.2f}")
+                assignment_config = {**global_defaults, **position_config, **tier_based_config}
+            else:
+                # Fall back to global defaults
+                logger.info(f"Using global defaults for {ticker} (no tier list or price unavailable)")
+                assignment_config = {**global_defaults, **position_config}
         
         # Add the ticker
         assignment_config["ticker"] = ticker
@@ -282,7 +330,7 @@ class AssignmentFactory:
         # Convert config field names to match TraderAssignment fields
         converted_config = cls._convert_config_fields(assignment_config)
         
-        logger.info(f"Creating dynamic assignment for {ticker} with global defaults + overrides")
+        logger.info(f"Creating dynamic assignment for {ticker} with position_size={converted_config.get('position_size', 'N/A')}")
         logger.debug(f"Dynamic assignment config for {ticker}: {converted_config}")
         
         try:
@@ -290,6 +338,47 @@ class AssignmentFactory:
         except Exception as e:
             logger.error(f"Error creating dynamic assignment for {ticker}: {str(e)}")
             raise
+
+    @classmethod
+    def _get_tier_based_position_sizing(cls, config: Dict, price: float = None) -> Dict:
+        """
+        Get position sizing configuration based on price tier list.
+        
+        :param config: Full configuration dictionary
+        :param price: Stock price for tier matching
+        :return: Dictionary with tier-based position sizing or empty dict if not applicable
+        """
+        if price is None:
+            logger.debug("Price not available for tier-based position sizing")
+            return {}
+        
+        tier_list_config = config.get("tier_list", [])
+        if not tier_list_config:
+            logger.debug("No tier list configuration found")
+            return {}
+        
+        try:
+            # Create TierList object from configuration
+            tier_entries = []
+            for tier_config in tier_list_config:
+                tier_entry = TierListEntry(**tier_config)
+                tier_entries.append(tier_entry)
+            
+            tier_list = TierList(tiers=tier_entries)
+            
+            # Get position sizing for the given price
+            tier_sizing = tier_list.get_position_size_for_price(price)
+            
+            if tier_sizing:
+                logger.debug(f"Found tier-based sizing for price ${price:.2f}: {tier_sizing}")
+                return tier_sizing
+            else:
+                logger.debug(f"No tier match found for price ${price:.2f}")
+                return {}
+                
+        except Exception as e:
+            logger.error(f"Error processing tier list configuration: {e}")
+            return {}
 
 
 if __name__ == "__main__":

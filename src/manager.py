@@ -304,11 +304,12 @@ class MongerManager:
             logger.error(f"Error getting provider status: {e}")
             return {}
 
-    def _handle_new_ticker(self, ticker: str) -> None:
+    def _handle_new_ticker(self, ticker: str, price: float = None) -> None:
         """
         Handle discovery of a new ticker from news alerts by creating a dynamic trader.
         
         :param ticker: The ticker symbol that was discovered
+        :param price: The current price of the ticker (used for tier-based position sizing)
         """
         try:
             # Check if we already have a trader for this ticker
@@ -331,8 +332,8 @@ class MongerManager:
                 # Generate dynamic client ID for the new ticker
                 client_id = self._generate_dynamic_client_id(ticker)
                 
-                # Create dynamic assignment using global defaults
-                dynamic_assignment = AssignmentFactory.create_dynamic_assignment(ticker, self.config_path, client_id)
+                # Create dynamic assignment using global defaults and price-based tier sizing
+                dynamic_assignment = AssignmentFactory.create_dynamic_assignment(ticker, self.config_path, client_id, price)
                 
                 # Create new TradeMonger instance
                 monger = TradeMonger(
@@ -349,7 +350,8 @@ class MongerManager:
                 if self.running:
                     import anyio
                     # We need to start this in the event loop
-                    logger.info(f"🚀 Starting dynamic trader for {ticker} with client ID {client_id}")
+                    price_info = f" at ${price:.2f}" if price is not None else " (price unavailable)"
+                    logger.info(f"🚀 Starting dynamic trader for {ticker}{price_info} with client ID {client_id}")
                     # Note: We'll need to handle this differently since we're not in async context
                     # For now, mark it as active and it will start on next cycle
                     monger.set_active(True)
@@ -357,7 +359,8 @@ class MongerManager:
                     # Store client_id for connection (assignment already has it)
                     # No need to store separately since it's in the assignment
                 
-                logger.info(f"✅ Created dynamic trader for {ticker} using global defaults")
+                price_info = f" at ${price:.2f}" if price is not None else " (price unavailable)"
+                logger.info(f"✅ Created dynamic trader for {ticker}{price_info} using tier-based position sizing")
                 
             except Exception as e:
                 logger.error(f"Failed to create dynamic assignment for {ticker}: {e}")

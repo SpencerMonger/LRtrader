@@ -51,7 +51,7 @@ class NewsAlertSignalProvider:
         self._client = None
         
         # Callback for new ticker discovery
-        self._new_ticker_callback: Optional[Callable[[str], None]] = None
+        self._new_ticker_callback: Optional[Callable[[str, float], None]] = None
 
         # Table and column configuration for news alerts
         self._timestamp_col = "timestamp"
@@ -114,11 +114,11 @@ class NewsAlertSignalProvider:
         # Calculate the lookback time
         lookback_time = datetime.now() - timedelta(minutes=self._lookback_minutes)
         
-        # Query for unique tickers in the lookback period
+        # Query for unique tickers with their latest price in the lookback period
         if self._enable_dynamic_discovery:
             # Dynamic mode: Query ALL tickers from news alerts (no filtering)
             query = f"""
-            SELECT DISTINCT {self._ticker_col}
+            SELECT DISTINCT {self._ticker_col}, price
             FROM {self._table_name}
             WHERE {self._timestamp_col} >= %(lookback_time)s
             """
@@ -127,7 +127,7 @@ class NewsAlertSignalProvider:
         else:
             # Static mode: Only query for configured tickers
             query = f"""
-            SELECT DISTINCT {self._ticker_col}
+            SELECT DISTINCT {self._ticker_col}, price
             FROM {self._table_name}
             WHERE {self._timestamp_col} >= %(lookback_time)s
             AND {self._ticker_col} IN %(configured_tickers)s
@@ -144,9 +144,10 @@ class NewsAlertSignalProvider:
             current_time = datetime.now()
             new_signals = {}
             
-            # Process each unique ticker found in the news alerts
+            # Process each unique ticker found in the news alerts 
             for row in result.result_rows:
                 ticker = row[0]
+                price = row[1] if len(row) > 1 else None
                 
                 # Check if this ticker is new or hasn't been seen recently
                 last_seen = self._ticker_last_seen.get(ticker)
@@ -169,22 +170,31 @@ class NewsAlertSignalProvider:
                         signal_flag = PriceDirection.BEARISH
                         logger.debug(f"Inverting news alert signal for {ticker} from BULLISH to BEARISH")
                     
-                    new_signals[ticker] = {'flag': signal_flag, 'timestamp': current_time}
+                    # Include price information in the signal
+                    signal_data = {
+                        'flag': signal_flag, 
+                        'timestamp': current_time,
+                        'price': price
+                    }
+                    new_signals[ticker] = signal_data
                     self._ticker_last_seen[ticker] = current_time
                     
-                    logger.info(f"News alert signal generated for {ticker}: {signal_flag.name}")
+                    price_info = f" at ${price:.2f}" if price is not None else " (price unavailable)"
+                    logger.info(f"News alert signal generated for {ticker}: {signal_flag.name}{price_info}")
                     
                     # Notify about new ticker discovery (especially for dynamic mode)
                     if self._new_ticker_callback:
                         if ticker not in self._ticker_configs or self._enable_dynamic_discovery:
                             logger.info(f"New ticker discovered in news alerts: {ticker}")
-                            self._new_ticker_callback(ticker)
+                            # Call callback with price information (may be None)
+                            self._new_ticker_callback(ticker, price)
 
             # Update signals with thread safety
             with self._lock:
                 for ticker, signal_data in new_signals.items():
                     self._latest_signals[ticker] = signal_data
-                    logger.info(f"Updated news alert signal for {ticker} to {signal_data['flag'].name}")
+                    price_info = f" at ${signal_data['price']:.2f}" if signal_data['price'] is not None else " (price unavailable)"
+                    logger.info(f"Updated news alert signal for {ticker} to {signal_data['flag'].name}{price_info}")
 
         except Exception as e:
             logger.error(f"Error querying ClickHouse news alerts: {e}")
@@ -244,11 +254,12 @@ class NewsAlertSignalProvider:
         with self._lock:
             return self._latest_signals.get(ticker)
 
-    def set_new_ticker_callback(self, callback: Callable[[str], None]) -> None:
+    def set_new_ticker_callback(self, callback: Callable[[str, float], None]) -> None:
         """
         Set callback for when new tickers are discovered in news alerts.
         
-        :param callback: Function to call when a new ticker is found
+        :param callback: Function to call when a new ticker is found. 
+                        Receives (ticker: str, price: float) where price may be None.
         """
         self._new_ticker_callback = callback
         logger.info("New ticker callback set for NewsAlertSignalProvider")
