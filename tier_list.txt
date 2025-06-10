@@ -1,0 +1,16 @@
+Price & Size Tier list
+
+$.01 < price < $1.00
+Share size= 8000
+
+$1.00 < price < $3.00
+Share size= 5000
+
+$3.00 < price < $5.00
+Share size= 5000
+
+$5.00 < price < $8.00
+Share size= 2500
+
+$8.00 < price
+Share size= 1000
