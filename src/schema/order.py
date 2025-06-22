@@ -96,22 +96,16 @@ class MongerOrder(BaseModel):
 
         # Determine if outside RTH flag should be set
         eastern = pytz.timezone("US/Eastern")
-        now_et = datetime.now(eastern)
+        now_utc = datetime.now(pytz.UTC)
+        now_et = now_utc.astimezone(eastern)
         rth_start = time(9, 30)
         rth_end = time(16, 0)
         is_outside_rth_time = not (rth_start <= now_et.time() <= rth_end)
 
-        # Only allow certain exit types outside RTH
-        allowed_outside_rth_types = [
-            OrderType.EXIT,
-            OrderType.EMERGENCY_EXIT,
-            OrderType.DANGLING_SHARES,
-            OrderType.STOP_LOSS,
-            OrderType.TAKE_PROFIT,
-        ]
-        is_allowed_type_for_ah = self.order_type in allowed_outside_rth_types
-
-        ib_order.outsideRth = is_outside_rth_time and is_allowed_type_for_ah
+        # Allow ALL order types outside RTH (removed restriction)
+        # Previously only certain exit types were allowed outside RTH
+        # Now all order types can be placed outside RTH and will be marked accordingly
+        ib_order.outsideRth = is_outside_rth_time
 
         ib_order.transmit = True
 

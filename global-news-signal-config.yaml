@@ -14,24 +14,24 @@ signal_strategy:
 tier_list:
   - price_min: 0.01
     price_max: 1.00
-    unit_position_size: 8000
-    max_position_size: 24000
+    unit_position_size: 10000
+    max_position_size: 20000
   - price_min: 1.00
     price_max: 3.00
-    unit_position_size: 6000
-    max_position_size: 18000
+    unit_position_size: 8000
+    max_position_size: 16000
   - price_min: 3.00
     price_max: 5.00
     unit_position_size: 5000
-    max_position_size: 15000
+    max_position_size: 10000
   - price_min: 5.00
     price_max: 8.00
-    unit_position_size: 2500
-    max_position_size: 7500
+    unit_position_size: 3000
+    max_position_size: 6000
   - price_min: 8.00
     price_max: 999999.99  # Effective maximum for stocks over $8
-    unit_position_size: 1000
-    max_position_size: 3000
+    unit_position_size: 2000
+    max_position_size: 4000
 
 # Global trading defaults - Applied to ALL tickers discovered via news alerts
 # These values are used as fallback when price information is not available
@@ -43,9 +43,9 @@ global_defaults:
   unit_position_size: 1000           # Default position size for all tickers (fallback)
   max_position_size: 3000            # Maximum position size for all tickers (fallback)
   trade_threshold: 180              # Seconds between trades
-  max_hold_time: 7200              # Maximum hold time in seconds
+  max_hold_time: 10800              # Maximum hold time in seconds
   take_profit_target: 0.99         # Take profit target (0.2%)
-  stop_loss_target: 0.10           # Stop loss target (0.5%)
+  stop_loss_target: 0.30           # Stop loss target (0.5%)
   stop_loss_strat: STATIC           # Stop loss strategy
   spread_strategy: WORST             # Spread strategy
   spread_offset: 0                  # Spread offset
@@ -53,8 +53,8 @@ global_defaults:
 
 # Position-wide risk management settings
 position:
-  max_loss_per_trade: 7600          # Maximum loss per trade
-  max_loss_cumulative: 7600         # Maximum cumulative loss
+  max_loss_per_trade: 9000          # Maximum loss per trade
+  max_loss_cumulative: 9000         # Maximum cumulative loss
   clip_activation: 8000             # Clip activation level
   clip_stop_loss: 2000             # Clip stop loss level
 
