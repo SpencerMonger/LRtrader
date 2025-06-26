@@ -260,11 +260,19 @@ async def main():
             logger.error("No valid assignments found in config file")
             return
 
+        # Extract max_loss_cumulative from config to use as max_pnl
+        config = AssignmentFactory.load_config(args.config)
+        position_config = config.get("position", {})
+        max_loss_cumulative = position_config.get("max_loss_cumulative", 15000)  # Default fallback
+        max_pnl = -abs(max_loss_cumulative)  # Convert to negative as expected by portfolio manager
+        
+        logger.info(f"Using max_loss_cumulative from config: ${max_loss_cumulative} (max_pnl: {max_pnl})")
+
         logger.info(f"Loaded {len(assignments)} assignments from config")
         for assignment in assignments:
             logger.info(f"Configured trader for {assignment.ticker}")
 
-        manager = MongerManager(assignments, args.account, host=host, port=port, max_pnl=-15000)
+        manager = MongerManager(assignments, args.account, host=host, port=port, max_pnl=max_pnl)
 
         def signal_handler(signum, frame):
             global shutdown_flag

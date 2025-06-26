@@ -53,6 +53,13 @@ async def main() -> None:
         is_global_config = "global_defaults" in config
         signal_config = AssignmentFactory.create_signal_config(args.config)
         
+        # Extract max_loss_cumulative from config to use as max_pnl
+        position_config = config.get("position", {})
+        max_loss_cumulative = position_config.get("max_loss_cumulative", 50000)  # Default fallback
+        max_pnl = -abs(max_loss_cumulative)  # Convert to negative as expected by portfolio manager
+        
+        logger.info(f"Using max_loss_cumulative from config: ${max_loss_cumulative} (max_pnl: {max_pnl})")
+        
         if is_global_config and signal_config.enable_dynamic_discovery:
             # For global configs with dynamic discovery, assignments start empty
             # Traders will be created dynamically when signals appear
@@ -75,7 +82,7 @@ async def main() -> None:
             config_path=args.config,  # Pass config path for signal configuration
             host=args.host, 
             port=args.port, 
-            max_pnl=-50000
+            max_pnl=max_pnl
         )
 
         def signal_handler(signum, frame):
