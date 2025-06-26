@@ -52,7 +52,7 @@ class MongerOrder(BaseModel):
             case OrderType.EXIT:
                 return "LMT"
             case OrderType.EMERGENCY_EXIT:
-                return "MKT"
+                return "LMT"
             case OrderType.DANGLING_SHARES:
                 return "LMT"
 
@@ -90,22 +90,9 @@ class MongerOrder(BaseModel):
 
         # Explicitly set etradeOnly to False to avoid default issues
         ib_order.etradeOnly = False
-        # # Set etradeOnly and firmQuoteOnly to empty strings as requested
-        # ib_order.etradeOnly = ""
-        # ib_order.firmQuoteOnly = ""
 
-        # Determine if outside RTH flag should be set
-        eastern = pytz.timezone("US/Eastern")
-        now_utc = datetime.now(pytz.UTC)
-        now_et = now_utc.astimezone(eastern)
-        rth_start = time(9, 30)
-        rth_end = time(16, 0)
-        is_outside_rth_time = not (rth_start <= now_et.time() <= rth_end)
-
-        # Allow ALL order types outside RTH (removed restriction)
-        # Previously only certain exit types were allowed outside RTH
-        # Now all order types can be placed outside RTH and will be marked accordingly
-        ib_order.outsideRth = is_outside_rth_time
+        # Hardcode outsideRth to True since this codebase ONLY trades outside regular market hours
+        ib_order.outsideRth = True
 
         ib_order.transmit = True
 
@@ -128,6 +115,10 @@ class MongerOrder(BaseModel):
             expiration_str = expiration.strftime("%Y%m%d-%H:%M:%S")
             ib_order.tif = "GTD"
             ib_order.goodTillDate = expiration_str
+
+        # Add GTC for EMERGENCY_EXIT orders to allow outside RTH execution
+        elif self.order_type == OrderType.EMERGENCY_EXIT:
+            ib_order.tif = "GTC"
 
         if self.order_type == OrderType.STOP_LOSS:
             # Set the stop price

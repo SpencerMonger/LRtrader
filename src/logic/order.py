@@ -898,10 +898,17 @@ class OrderExecutor(OrderStatusMixin, MarketDataMixin, TraderMixin):
         # Ensure that we have an emergency exit order in place for the entire
         # position size
         exit_size = abs(self.position.true_share_count)
+        
+        # Determine emergency exit price for fast execution:
+        # For selling positions (long), use bid price for immediate execution
+        # For buying to cover (short), use ask price for immediate execution
+        emergency_action = OrderAction.SELL if self.position.true_share_count > 0 else OrderAction.BUY
+        emergency_price = self.market_data.bid if emergency_action == OrderAction.SELL else self.market_data.ask
+        
         if emergency_exit_order := self.position.emergency_exit_order:
-            if emergency_exit_order.requires_update(exit_size, self.market_data.last):
+            if emergency_exit_order.requires_update(exit_size, emergency_price):
                 emergency_exit_order.size = exit_size
-                emergency_exit_order.limit_price = self.market_data.last
+                emergency_exit_order.limit_price = emergency_price
                 try:
                     self.modify_order(emergency_exit_order)
                 except CannotModifyFilledOrderError as e:
@@ -912,10 +919,9 @@ class OrderExecutor(OrderStatusMixin, MarketDataMixin, TraderMixin):
             if self.position.true_share_count == 0: # Should not happen if check above passed, but safety first
                  logger.warning(f"[{self.assignment.ticker}] Attempting emergency exit but true_share_count is already 0. Skipping order placement.")
                  return 
-            emergency_action = OrderAction.SELL if self.position.true_share_count > 0 else OrderAction.BUY
             self.place_order(
                 order_type=OrderType.EMERGENCY_EXIT,
                 order_action=emergency_action, # Use calculated action
                 size=exit_size,
-                price=self.market_data.last,
+                price=emergency_price,
             )
