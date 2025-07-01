@@ -1,17 +1,21 @@
 from functools import wraps
 import queue
+import time
 from queue import Queue
 from threading import Thread
-from typing import Callable
+from typing import Callable, Dict
 
 from loguru import logger
 
 
 class OrderQueue:
-    def __init__(self):
+    def __init__(self, staggered_order_delay: float = 5.0):
         self.queue = Queue()
         self.worker_thread = None
         self.is_running = False
+        # Track last entry order time per ticker for staggered delays
+        self.last_entry_order_time: Dict[str, float] = {}
+        self.entry_order_delay = staggered_order_delay  # Configurable delay between entry orders
 
     def start(self):
         """Start the worker thread."""
@@ -23,7 +27,7 @@ class OrderQueue:
         """Stop the worker thread."""
         self.is_running = False
         # Add a sentinel value to wake up the worker thread immediately
-        self.queue.put((None, None, None))
+        self.queue.put((None, None, None, None))
         if self.worker_thread:
             self.worker_thread.join(timeout=5)  # Add timeout to prevent infinite wait
             if self.worker_thread.is_alive():
@@ -32,17 +36,36 @@ class OrderQueue:
     def enqueue(self, func: Callable, *args, **kwargs):
         """Enqueue a function call."""
         if self.is_running:  # Only enqueue if running
-            self.queue.put((func, args, kwargs))
+            # Extract ticker from args if this is a handle_prediction call
+            ticker = None
+            if hasattr(args[0], 'assignment') and hasattr(args[0].assignment, 'ticker'):
+                ticker = args[0].assignment.ticker
+            
+            self.queue.put((func, args, kwargs, ticker))
 
     def _worker(self):
         """Worker thread to process queued function calls."""
         while self.is_running:
             try:
-                func, args, kwargs = self.queue.get(timeout=1)
+                func, args, kwargs, ticker = self.queue.get(timeout=1)
                 
                 # Check for sentinel value (stop signal)
                 if func is None:
                     break
+                
+                # Apply staggered delay for entry orders
+                if ticker and func.__name__ == 'handle_prediction':
+                    current_time = time.time()
+                    last_time = self.last_entry_order_time.get(ticker, 0)
+                    time_since_last = current_time - last_time
+                    
+                    if time_since_last < self.entry_order_delay:
+                        delay_needed = self.entry_order_delay - time_since_last
+                        logger.info(f"[{ticker}] Applying staggered delay: {delay_needed:.1f}s")
+                        time.sleep(delay_needed)
+                    
+                    # Update last entry order time
+                    self.last_entry_order_time[ticker] = time.time()
                     
                 try:
                     func(*args, **kwargs)

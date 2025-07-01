@@ -62,6 +62,7 @@ class MongerManager:
         
         # Create signal configuration from config file
         signal_config_dict = {}
+        staggered_order_delay = 5.0  # Default value
         if self.config_path:
             try:
                 signal_config = AssignmentFactory.create_signal_config(self.config_path)
@@ -71,7 +72,9 @@ class MongerManager:
                     'news_alert_lookback_minutes': signal_config.news_alert_lookback_minutes,
                     'enable_dynamic_discovery': signal_config.enable_dynamic_discovery
                 }
-                logger.info(f"Loaded signal config from {self.config_path}")
+                # Extract staggered_order_delay from signal_config
+                staggered_order_delay = getattr(signal_config, 'staggered_order_delay', 5.0)
+                logger.info(f"Loaded signal config from {self.config_path} with staggered_order_delay: {staggered_order_delay}s")
             except Exception as e:
                 logger.error(f"Failed to load signal config from {self.config_path}: {e}")
                 # Use default config for backward compatibility
@@ -89,6 +92,9 @@ class MongerManager:
                 'news_alert_lookback_minutes': 3,
                 'enable_dynamic_discovery': False
             }
+        
+        # Store staggered_order_delay as instance variable for use in _handle_new_ticker
+        self.staggered_order_delay = staggered_order_delay
         
         # Initialize the composite signal provider
         try:
@@ -119,7 +125,8 @@ class MongerManager:
                     assignment=assignment, 
                     account_id=self.account, 
                     signal_provider=self.signal_provider,
-                    portfolio_manager=self.portfolio_manager # Pass the manager instance
+                    portfolio_manager=self.portfolio_manager, # Pass the manager instance
+                    staggered_order_delay=self.staggered_order_delay
                 )
                 self.mongers.append(monger) # Add the created monger to the list
             except Exception as e:
@@ -340,7 +347,8 @@ class MongerManager:
                     assignment=dynamic_assignment,
                     account_id=self.account,
                     signal_provider=self.signal_provider,
-                    portfolio_manager=self.portfolio_manager
+                    portfolio_manager=self.portfolio_manager,
+                    staggered_order_delay=self.staggered_order_delay
                 )
                 
                 # Add to our mongers list

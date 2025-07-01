@@ -47,6 +47,7 @@ class SignalConfig(BaseModel):
     enable_news_alerts: bool = Field(False, description="Enable news alert signals")
     news_alert_lookback_minutes: int = Field(3, description="Minutes to look back for news alerts")
     enable_dynamic_discovery: bool = Field(False, description="Enable dynamic ticker discovery from news alerts")
+    staggered_order_delay: float = Field(5.0, description="Seconds to wait between entry orders for same ticker")
 
 
 class DynamicSettings(BaseModel):

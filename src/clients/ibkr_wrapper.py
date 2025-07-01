@@ -89,7 +89,7 @@ class MongerWrapper(EWrapper):
     order_executor: OrderExecutor
     market_data: MarketData
 
-    def __init__(self, assignment: TraderAssignment, portfolio_manager: Optional["PortfolioManager"] = None):
+    def __init__(self, assignment: TraderAssignment, portfolio_manager: Optional["PortfolioManager"] = None, staggered_order_delay: float = 5.0):
         """Initialize the MongerWrapper."""
         EWrapper.__init__(self)
 
@@ -101,12 +101,13 @@ class MongerWrapper(EWrapper):
         context = {'portfolio_manager': self.portfolio_manager}
         position_obj = Position(assignment=assignment, model_config={"arbitrary_types_allowed": True}, **context)
 
-        # Initialize the order executor, passing the created position_obj
+        # Initialize the order executor, passing the created position_obj and staggered delay config
         self.order_executor = OrderExecutor(
             assignment=assignment, 
             position=position_obj, # Pass the created Position object
             market_data=self.market_data, 
-            portfolio_manager=self.portfolio_manager
+            portfolio_manager=self.portfolio_manager,
+            staggered_order_delay=staggered_order_delay
         )
 
     def initialize_executor(self, tws_app: "TradeMonger") -> None:

@@ -442,31 +442,35 @@ class TraderMixin(AbstractOrderExecutorMixin):
     def handle_prediction(self, prediction: Prediction):
         """
         Handle the prediction and execute the order if the conditions are favorable.
+        
+        This method is called with staggered delays to ensure orders are placed
+        with current market prices, not stale prices from when signals were queued.
 
         :param Prediction prediction: The prediction from the inference model.
         """
         logger.debug(f"[{self.assignment.ticker}] Handling prediction: Flag={prediction.flag}, Conf={getattr(prediction, 'confidence', 'N/A')}")
+        
+        # Re-check predicates at the time of actual order placement
+        # This ensures we're using current position size, not stale data
         predicates_passed = self.check_boolean_entry_predicate(prediction)
         logger.debug(f"[{self.assignment.ticker}] Predicates passed: {predicates_passed}")
 
         if predicates_passed:
-            # NOTE: The position size for a ticker is handled in the assignment
-            # scale_factor = self.check_position_scaling_predicate()
-            # position_size = self.assignment.position_size * scale_factor
-
-            # Ensure that we do not exceed the maximum position size
+            # Calculate position size based on CURRENT position state
             max_position_size = self.assignment.max_position_size
             delta_to_max = max_position_size - self.position.size
             position_size = min(delta_to_max, self.assignment.position_size)
 
-            # Determine spread strategy: BEST = True, WORST = False
-            best_spread = self.assignment.spread_strategy.upper() == "BEST"
-            entry_price = self.market_data.order_book.get_entry_price(prediction.flag, best_spread)
-            logger.debug(f"[{self.assignment.ticker}] Calculated Entry: Size={position_size}, Price={entry_price}, Strategy={self.assignment.spread_strategy}")
-
             if position_size == 0:
                 logger.debug(f"[{self.assignment.ticker}] Position size is 0, skipping order placement.")
                 return
+
+            # Get FRESH market data at the time of actual order placement
+            # This is critical for fast-moving stocks where price changes rapidly
+            best_spread = self.assignment.spread_strategy.upper() == "BEST"
+            entry_price = self.market_data.order_book.get_entry_price(prediction.flag, best_spread)
+            
+            logger.info(f"[{self.assignment.ticker}] FRESH ORDER PLACEMENT: Size={position_size}, Price=${entry_price:.2f}, Strategy={self.assignment.spread_strategy}, Current Position={self.position.size}/{max_position_size}")
 
             order_action = (
                 OrderAction.BUY if prediction.flag == PriceDirection.BULLISH else OrderAction.SELL
@@ -581,12 +585,13 @@ class OrderExecutor(OrderStatusMixin, MarketDataMixin, TraderMixin):
         assignment: TraderAssignment,
         market_data: MarketData,
         tws_app: Optional["TradeMonger"] = None,
-        portfolio_manager: Optional[Any] = None
+        portfolio_manager: Optional[Any] = None,
+        staggered_order_delay: float = 5.0
     ):
         self.assignment = assignment
         self.position = position
         self.market_data = market_data
-        self.order_queue = OrderQueue()
+        self.order_queue = OrderQueue(staggered_order_delay=staggered_order_delay)
 
         # Initialize Mixins
         super(OrderStatusMixin, self).__init__()

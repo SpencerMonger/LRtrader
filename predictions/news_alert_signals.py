@@ -1,7 +1,7 @@
 import os
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Set, Callable
 
 import clickhouse_connect
@@ -42,6 +42,9 @@ class NewsAlertSignalProvider:
         # Track signals and seen tickers
         self._latest_signals: Dict[str, dict] = {}  # Stores {'ticker': {'flag': PriceDirection, 'timestamp': datetime}}
         self._seen_tickers: Set[str] = set()  # Track tickers we've seen for discovery purposes
+        
+        # NEW: Track processed news alerts to prevent duplicate signal generation
+        self._processed_alerts: Dict[str, Set[datetime]] = {}  # {ticker: {set of processed source timestamps}}
         
         # Threading management
         self._lock = threading.Lock()
@@ -102,8 +105,7 @@ class NewsAlertSignalProvider:
     def _poll_db(self):
         """Queries the news_alert table and generates signals for all tickers found within the lookback period.
         
-        Signals are generated continuously for any ticker with news alerts - position size limits
-        in the OrderExecutor handle preventing over-positioning.
+        Only generates signals for NEW news alerts that haven't been processed before.
         """
         if not self._client:
             logger.warning("No ClickHouse connection, attempting to reconnect.")
@@ -114,8 +116,8 @@ class NewsAlertSignalProvider:
 
         logger.debug(f"Polling ClickHouse news alerts for lookback period: {self._lookback_minutes} minutes")
         
-        # Calculate the lookback time
-        lookback_time = datetime.now() - timedelta(minutes=self._lookback_minutes)
+        # Calculate the lookback time using UTC timezone
+        lookback_time = datetime.now(timezone.utc) - timedelta(minutes=self._lookback_minutes)
         
         # Query for unique tickers with their latest price and timestamp in the lookback period
         if self._enable_dynamic_discovery:
@@ -146,7 +148,7 @@ class NewsAlertSignalProvider:
         try:
             result = self._client.query(query, parameters=query_params)
             
-            current_time = datetime.now()
+            current_time = datetime.now(timezone.utc)
             new_signals = {}
             
             # Process each unique ticker found in the news alerts 
@@ -155,48 +157,68 @@ class NewsAlertSignalProvider:
                 price = row[1] if len(row) > 1 else None
                 latest_timestamp = row[2] if len(row) > 2 else None
                 
-                # Only generate signal if the latest timestamp is recent (within last 10 seconds)
-                # This prevents generating signals from stale database entries
-                if latest_timestamp:
-                    time_diff = (current_time - latest_timestamp).total_seconds()
-                    should_generate_signal = time_diff <= 10  # Only if within last 10 seconds
-                    
-                    if not should_generate_signal:
-                        logger.debug(f"Skipping signal for {ticker}: latest timestamp {latest_timestamp} is {time_diff:.1f}s old (> 10s threshold)")
-                        continue
-                else:
-                    # If no timestamp available, skip
+                # Ensure latest_timestamp is timezone-aware
+                if latest_timestamp and latest_timestamp.tzinfo is None:
+                    # If the timestamp is timezone-naive, assume it's in UTC
+                    latest_timestamp = latest_timestamp.replace(tzinfo=timezone.utc)
+                
+                # Skip if no timestamp available
+                if not latest_timestamp:
                     logger.debug(f"Skipping signal for {ticker}: no timestamp available")
                     continue
                 
-                if should_generate_signal:
-                    # Default to BULLISH signal for news alerts
-                    signal_flag = PriceDirection.BULLISH
+                # NEW: Check if we've already processed this exact news alert
+                with self._lock:
+                    if ticker not in self._processed_alerts:
+                        self._processed_alerts[ticker] = set()
                     
-                    # Check inversion status for the ticker (use default if not configured)
-                    ticker_config = self._ticker_configs.get(ticker, {'inverted': 'regular'})
-                    if ticker_config.get('inverted') == 'inverted':
-                        signal_flag = PriceDirection.BEARISH
-                        logger.debug(f"Inverting news alert signal for {ticker} from BULLISH to BEARISH")
-                    
-                    # Include price information in the signal
-                    signal_data = {
-                        'flag': signal_flag, 
-                        'timestamp': current_time,
-                        'price': price,
-                        'source_timestamp': latest_timestamp
-                    }
-                    new_signals[ticker] = signal_data
-                    
-                    price_info = f" at ${price:.2f}" if price is not None else " (price unavailable)"
-                    logger.info(f"News alert signal generated for {ticker}: {signal_flag.name}{price_info} (source: {latest_timestamp})")
-                    
-                    # Notify about new ticker discovery (especially for dynamic mode)
-                    if self._new_ticker_callback:
-                        if ticker not in self._ticker_configs or self._enable_dynamic_discovery:
-                            logger.info(f"New ticker discovered in news alerts: {ticker}")
-                            # Call callback with price information (may be None)
-                            self._new_ticker_callback(ticker, price)
+                    # If we've already processed this timestamp for this ticker, skip it
+                    if latest_timestamp in self._processed_alerts[ticker]:
+                        logger.debug(f"Skipping already processed news alert for {ticker} at {latest_timestamp}")
+                        continue
+                
+                # Only generate signal if the latest timestamp is recent (within last 10 seconds)
+                # This prevents generating signals from stale database entries
+                time_diff = (current_time - latest_timestamp).total_seconds()
+                should_generate_signal = time_diff <= 10  # Only if within last 10 seconds
+                
+                if not should_generate_signal:
+                    logger.debug(f"Skipping signal for {ticker}: latest timestamp {latest_timestamp} is {time_diff:.1f}s old (> 10s threshold)")
+                    continue
+                
+                # Generate signal for new news alert
+                # Default to BULLISH signal for news alerts
+                signal_flag = PriceDirection.BULLISH
+                
+                # Check inversion status for the ticker (use default if not configured)
+                ticker_config = self._ticker_configs.get(ticker, {'inverted': 'regular'})
+                if ticker_config.get('inverted') == 'inverted':
+                    signal_flag = PriceDirection.BEARISH
+                    logger.debug(f"Inverting news alert signal for {ticker} from BULLISH to BEARISH")
+                
+                # Include price information in the signal
+                signal_data = {
+                    'flag': signal_flag, 
+                    'timestamp': current_time,
+                    'price': price,
+                    'source_timestamp': latest_timestamp
+                }
+                new_signals[ticker] = signal_data
+                
+                price_info = f" at ${price:.2f}" if price is not None else " (price unavailable)"
+                logger.info(f"News alert signal generated for {ticker}: {signal_flag.name}{price_info} (source: {latest_timestamp})")
+                
+                # NEW: Mark this news alert as processed
+                with self._lock:
+                    self._processed_alerts[ticker].add(latest_timestamp)
+                    logger.debug(f"Marked news alert for {ticker} at {latest_timestamp} as processed")
+                
+                # Notify about new ticker discovery (especially for dynamic mode)
+                if self._new_ticker_callback:
+                    if ticker not in self._ticker_configs or self._enable_dynamic_discovery:
+                        logger.info(f"New ticker discovered in news alerts: {ticker}")
+                        # Call callback with price information (may be None)
+                        self._new_ticker_callback(ticker, price)
 
             # Update signals with thread safety
             with self._lock:
@@ -204,6 +226,12 @@ class NewsAlertSignalProvider:
                     self._latest_signals[ticker] = signal_data
                     price_info = f" at ${signal_data['price']:.2f}" if signal_data['price'] is not None else " (price unavailable)"
                     logger.info(f"Updated news alert signal for {ticker} to {signal_data['flag'].name}{price_info}")
+                    
+            # Log summary of this polling cycle
+            if new_signals:
+                logger.info(f"Generated {len(new_signals)} new signals this cycle: {list(new_signals.keys())}")
+            else:
+                logger.debug("No new signals generated this cycle")
 
         except Exception as e:
             logger.error(f"Error querying ClickHouse news alerts: {e}")
@@ -217,7 +245,12 @@ class NewsAlertSignalProvider:
         """Runs the scheduled polling task."""
         # Schedule to run every 2 seconds for very frequent news alert checking
         schedule.every(2).seconds.do(self._poll_db)
+        
+        # Schedule cleanup of old processed alerts every 10 minutes
+        schedule.every(10).minutes.do(lambda: self.clear_old_signals(max_age_minutes=30))
+        
         logger.info("Scheduled ClickHouse news alert polling every 2 seconds.")
+        logger.info("Scheduled cleanup of old processed alerts every 10 minutes.")
 
         while not self._stop_event.is_set():
             schedule.run_pending()
@@ -295,20 +328,53 @@ class NewsAlertSignalProvider:
     def clear_old_signals(self, max_age_minutes: int = 30):
         """
         Clear signals older than the specified age to prevent memory buildup.
+        Also cleans up old processed alerts to prevent memory leaks.
         
         :param max_age_minutes: Maximum age of signals to keep (default: 30 minutes)
         """
-        cutoff_time = datetime.now() - timedelta(minutes=max_age_minutes)
+        cutoff_time = datetime.now(timezone.utc) - timedelta(minutes=max_age_minutes)
         
         with self._lock:
+            # Clear old signals
             tickers_to_remove = []
             for ticker, signal_data in self._latest_signals.items():
-                if signal_data['timestamp'] < cutoff_time:
+                # Ensure signal timestamp is timezone-aware for comparison
+                signal_timestamp = signal_data['timestamp']
+                if signal_timestamp.tzinfo is None:
+                    signal_timestamp = signal_timestamp.replace(tzinfo=timezone.utc)
+                
+                if signal_timestamp < cutoff_time:
                     tickers_to_remove.append(ticker)
             
             for ticker in tickers_to_remove:
                 del self._latest_signals[ticker]
                 logger.debug(f"Cleared old news alert signal for {ticker}")
+            
+            # NEW: Clear old processed alerts to prevent memory buildup
+            for ticker in list(self._processed_alerts.keys()):
+                # Remove timestamps older than cutoff
+                old_timestamps = {ts for ts in self._processed_alerts[ticker] if ts < cutoff_time}
+                self._processed_alerts[ticker] -= old_timestamps
+                
+                if old_timestamps:
+                    logger.debug(f"Cleared {len(old_timestamps)} old processed alerts for {ticker}")
+                
+                # Remove ticker entry if no processed alerts remain
+                if not self._processed_alerts[ticker]:
+                    del self._processed_alerts[ticker]
+                    logger.debug(f"Removed empty processed alerts entry for {ticker}")
+
+    def get_processed_alerts_stats(self) -> Dict[str, int]:
+        """
+        Get statistics about processed alerts for monitoring purposes.
+        
+        :return: Dictionary with statistics about processed alerts per ticker
+        """
+        with self._lock:
+            stats = {}
+            for ticker, timestamps in self._processed_alerts.items():
+                stats[ticker] = len(timestamps)
+            return stats
 
 
 # Example Usage (for testing purposes)

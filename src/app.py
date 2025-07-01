@@ -50,9 +50,9 @@ class TradeMonger(MongerWrapper, MongerClient):
 
     """
 
-    def __init__(self, assignment: TraderAssignment, account_id: str, signal_provider: CompositeSignalProvider, portfolio_manager: "PortfolioManager"):
-        # Pass portfolio_manager to MongerWrapper superclass
-        MongerWrapper.__init__(self, assignment=assignment, portfolio_manager=portfolio_manager)
+    def __init__(self, assignment: TraderAssignment, account_id: str, signal_provider: CompositeSignalProvider, portfolio_manager: "PortfolioManager", staggered_order_delay: float = 5.0):
+        # Pass portfolio_manager and staggered_order_delay to MongerWrapper superclass
+        MongerWrapper.__init__(self, assignment=assignment, portfolio_manager=portfolio_manager, staggered_order_delay=staggered_order_delay)
         MongerClient.__init__(self, wrapper=self)
 
         self.account_id = account_id
@@ -178,9 +178,9 @@ class TradeMonger(MongerWrapper, MongerClient):
             while not self.stop_event.is_set():
                 # Log loop execution for this ticker
                 logger.trace(f"[{self.ticker}] Running signal check iteration.")
-                # Check for signals more frequently, e.g., every 2 seconds
+                # Check for signals more frequently, e.g., every 1 second
                 try:
-                    await anyio.sleep(2)
+                    await anyio.sleep(1)
                 except anyio.get_cancelled_exc_class():
                     break
 
