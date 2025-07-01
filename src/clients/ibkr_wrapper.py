@@ -41,12 +41,19 @@ class PortfolioWrapper(EWrapper):
     """
 
     def pnl(self, reqId: int, dailyPnL: float, unrealizedPnL: float, realizedPnL: float):
+        # Debug logging only every 10 seconds to avoid spam
         if datetime.now().second % 10 == 0:
             logger.debug(
                 f"Daily PnL: {dailyPnL}, Unrealized PnL: {unrealizedPnL}, "
                 f" Realized PnL: {realizedPnL}"
             )
-        self.check_pnl_threshold(float(dailyPnL))
+        
+        # Calculate total PnL (realized + unrealized) for proper risk management
+        total_pnl = realizedPnL + unrealizedPnL
+        logger.debug(f"Total PnL for threshold check: {total_pnl} (Realized: {realizedPnL} + Unrealized: {unrealizedPnL})")
+        
+        # CRITICAL: Check PnL threshold on EVERY update, not just when logging
+        self.check_pnl_threshold(float(total_pnl))
 
 
 class MongerWrapper(EWrapper):

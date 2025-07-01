@@ -30,7 +30,7 @@ class NewsAlertSignalProvider:
         Initializes the provider, loads configuration, and sets up state.
 
         :param ticker_configs: A list of dictionaries containing ticker configuration
-        :param lookback_minutes: Minutes to look back for unique ticker detection (default: 3)
+        :param lookback_minutes: Minutes to look back for news alerts in database query (default: 3)
         :param enable_dynamic_discovery: If True, discover ANY ticker from news alerts, not just configured ones
         """
         self._ticker_configs = {config['ticker']: config for config in ticker_configs}
@@ -41,8 +41,7 @@ class NewsAlertSignalProvider:
         
         # Track signals and seen tickers
         self._latest_signals: Dict[str, dict] = {}  # Stores {'ticker': {'flag': PriceDirection, 'timestamp': datetime}}
-        self._seen_tickers: Set[str] = set()  # Track tickers we've already seen to avoid duplicate signals
-        self._ticker_last_seen: Dict[str, datetime] = {}  # Track when each ticker was last seen
+        self._seen_tickers: Set[str] = set()  # Track tickers we've seen for discovery purposes
         
         # Threading management
         self._lock = threading.Lock()
@@ -101,7 +100,11 @@ class NewsAlertSignalProvider:
             self._client = None
 
     def _poll_db(self):
-        """Queries the news_alert table for unique tickers in the lookback period."""
+        """Queries the news_alert table and generates signals for all tickers found within the lookback period.
+        
+        Signals are generated continuously for any ticker with news alerts - position size limits
+        in the OrderExecutor handle preventing over-positioning.
+        """
         if not self._client:
             logger.warning("No ClickHouse connection, attempting to reconnect.")
             self._connect()
@@ -114,23 +117,25 @@ class NewsAlertSignalProvider:
         # Calculate the lookback time
         lookback_time = datetime.now() - timedelta(minutes=self._lookback_minutes)
         
-        # Query for unique tickers with their latest price in the lookback period
+        # Query for unique tickers with their latest price and timestamp in the lookback period
         if self._enable_dynamic_discovery:
             # Dynamic mode: Query ALL tickers from news alerts (no filtering)
             query = f"""
-            SELECT DISTINCT {self._ticker_col}, price
+            SELECT {self._ticker_col}, price, MAX({self._timestamp_col}) as latest_timestamp
             FROM {self._table_name}
             WHERE {self._timestamp_col} >= %(lookback_time)s
+            GROUP BY {self._ticker_col}, price
             """
             query_params = {'lookback_time': lookback_time}
             logger.debug("Running news alert query in DYNAMIC mode - will discover any ticker")
         else:
             # Static mode: Only query for configured tickers
             query = f"""
-            SELECT DISTINCT {self._ticker_col}, price
+            SELECT {self._ticker_col}, price, MAX({self._timestamp_col}) as latest_timestamp
             FROM {self._table_name}
             WHERE {self._timestamp_col} >= %(lookback_time)s
             AND {self._ticker_col} IN %(configured_tickers)s
+            GROUP BY {self._ticker_col}, price
             """
             query_params = {
                 'lookback_time': lookback_time,
@@ -148,17 +153,21 @@ class NewsAlertSignalProvider:
             for row in result.result_rows:
                 ticker = row[0]
                 price = row[1] if len(row) > 1 else None
+                latest_timestamp = row[2] if len(row) > 2 else None
                 
-                # Check if this ticker is new or hasn't been seen recently
-                last_seen = self._ticker_last_seen.get(ticker)
-                
-                # Generate signal if:
-                # 1. We've never seen this ticker before, OR
-                # 2. We haven't seen this ticker in the last lookback period
-                should_generate_signal = (
-                    last_seen is None or 
-                    (current_time - last_seen).total_seconds() > (self._lookback_minutes * 60)
-                )
+                # Only generate signal if the latest timestamp is recent (within last 10 seconds)
+                # This prevents generating signals from stale database entries
+                if latest_timestamp:
+                    time_diff = (current_time - latest_timestamp).total_seconds()
+                    should_generate_signal = time_diff <= 10  # Only if within last 10 seconds
+                    
+                    if not should_generate_signal:
+                        logger.debug(f"Skipping signal for {ticker}: latest timestamp {latest_timestamp} is {time_diff:.1f}s old (> 10s threshold)")
+                        continue
+                else:
+                    # If no timestamp available, skip
+                    logger.debug(f"Skipping signal for {ticker}: no timestamp available")
+                    continue
                 
                 if should_generate_signal:
                     # Default to BULLISH signal for news alerts
@@ -174,13 +183,13 @@ class NewsAlertSignalProvider:
                     signal_data = {
                         'flag': signal_flag, 
                         'timestamp': current_time,
-                        'price': price
+                        'price': price,
+                        'source_timestamp': latest_timestamp
                     }
                     new_signals[ticker] = signal_data
-                    self._ticker_last_seen[ticker] = current_time
                     
                     price_info = f" at ${price:.2f}" if price is not None else " (price unavailable)"
-                    logger.info(f"News alert signal generated for {ticker}: {signal_flag.name}{price_info}")
+                    logger.info(f"News alert signal generated for {ticker}: {signal_flag.name}{price_info} (source: {latest_timestamp})")
                     
                     # Notify about new ticker discovery (especially for dynamic mode)
                     if self._new_ticker_callback:

@@ -44,7 +44,7 @@ global_defaults:
   max_position_size: 3000            # Maximum position size for all tickers (fallback)
   trade_threshold: 180              # Seconds between trades
   max_hold_time: 10800              # Maximum hold time in seconds
-  take_profit_target: 0.99         # Take profit target (0.2%)
+  take_profit_target: 0.85         # Take profit target (0.2%)
   stop_loss_target: 0.30           # Stop loss target (0.5%)
   stop_loss_strat: STATIC           # Stop loss strategy
   spread_strategy: WORST             # Spread strategy
@@ -53,8 +53,8 @@ global_defaults:
 
 # Position-wide risk management settings
 position:
-  max_loss_per_trade: 9000          # Maximum loss per trade
-  max_loss_cumulative: 9000         # Maximum cumulative loss
+  max_loss_per_trade: 4000          # Maximum loss per trade
+  max_loss_cumulative: 6000         # Maximum cumulative loss
   clip_activation: 8000             # Clip activation level
   clip_stop_loss: 2000             # Clip stop loss level
 

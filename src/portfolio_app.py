@@ -68,11 +68,30 @@ class PortfolioManager(PortfolioWrapper, MongerClient):
         self.disconnect()
 
     def check_pnl_threshold(self, pnl: float):
-        # Implement logic to check if PnL exceeds max_pnl and trigger emergency exit if necessary
-        # This is a placeholder - you'll need to implement the actual logic
+        """
+        Check if total PnL exceeds the maximum loss threshold and trigger emergency exit if necessary.
+        
+        :param pnl: Total PnL (realized + unrealized) for the account
+        """
+        logger.debug(f"PnL Threshold Check: Current Total PnL = ${pnl:.2f}, Max Loss Threshold = ${self.max_pnl:.2f}")
+        
         if pnl < self.max_pnl:
+            logger.critical(
+                f"PORTFOLIO RISK LIMIT BREACHED! "
+                f"Total PnL (${pnl:.2f}) has exceeded maximum loss threshold (${self.max_pnl:.2f}). "
+                f"Triggering emergency shutdown of all positions."
+            )
             with start_blocking_portal(backend="asyncio") as portal:
                 portal.call(self.cancel_func)
+        else:
+            # Only log when we're getting close to the threshold (within 80%)
+            threshold_ratio = pnl / self.max_pnl if self.max_pnl != 0 else 0
+            if threshold_ratio > 0.8:
+                remaining_loss_capacity = pnl - self.max_pnl
+                logger.warning(
+                    f"Approaching risk limit: Total PnL = ${pnl:.2f}, "
+                    f"Remaining loss capacity = ${remaining_loss_capacity:.2f}"
+                )
 
     def openOrder(self, orderId: OrderId, contract: Contract, order: Order, orderState: OrderState):
         # Find the monger for the ticker
