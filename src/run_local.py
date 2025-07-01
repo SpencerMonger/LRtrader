@@ -5,6 +5,7 @@ The Monger Trading Algorithm
 
 import sys
 import os
+from datetime import datetime
 
 # Add the project root directory (one level up from 'src') to the Python path
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
@@ -25,6 +26,11 @@ logger.remove() # Remove default handler
 # Set level back to DEBUG
 # logger.add(sys.stderr, level="DEBUG") # Add back stderr handler with DEBUG level
 logger.add(sys.stderr, level="TRACE") # Add back stderr handler with TRACE level for detailed debugging
+
+# Configure file logging with daily rotation and 5-day retention
+log_file_path = f"logs/newstrader_run_{{time:YYYYMMDD}}.log"
+logger.add(log_file_path, rotation="1 day", retention=5, level="INFO", format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | {name}:{function}:{line} - {message}", backtrace=True, diagnose=True)
+logger.info("File logging configured. Log file: {}", log_file_path.format(time=datetime.now()))
 
 def parse_arguments() -> argparse.Namespace:
     """Parse command-line arguments."""

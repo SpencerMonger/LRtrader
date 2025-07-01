@@ -6,6 +6,10 @@ PROJECT_DIR="$HOME/Development/newstrader"
 LOG_DIR="$PROJECT_DIR/logs"
 mkdir -p "$LOG_DIR"
 
+# Clean up old start/kill script logs (older than 5 days)
+find "$LOG_DIR" -name "start_newstrader_*.log" -type f -mtime +5 -delete
+find "$LOG_DIR" -name "kill_newstrader_*.log" -type f -mtime +5 -delete
+
 # Log file for today
 LOG_FILE="$LOG_DIR/start_newstrader_$(date +\%Y\%m\%d).log"
 EXEC_LOG="$LOG_DIR/script_execution.log"
@@ -74,10 +78,9 @@ fi
 
 # Run script in screen session using pdm
 echo "$(date) [UTC]: Starting newstrader in a screen session" >> "$LOG_FILE"
-RUN_LOG="$LOG_DIR/newstrader_run_$(date +\%Y\%m\%d).log"
-echo "$(date) [UTC]: Command output will be logged to $RUN_LOG" >> "$LOG_FILE"
-# Use absolute path for pdm and redirect stdout/stderr
-cd "$PROJECT_DIR" && screen -dmS newstrader /home/synk/.local/bin/pdm run python src/run_local.py --config global-news-signal-config.yaml --port 7497 >> "$RUN_LOG" 2>&1
+echo "$(date) [UTC]: Python application will create its own logs in $LOG_DIR" >> "$LOG_FILE"
+# The python script now handles its own logging, so we don't redirect stdout/stderr here.
+cd "$PROJECT_DIR" && screen -dmS newstrader /home/synk/.local/bin/pdm run python src/run_local.py --config global-news-signal-config.yaml --port 7497
 echo "Started screen session with name 'newstrader'" >> "$EXEC_LOG"
 
 # Give it a moment to start

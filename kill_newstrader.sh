@@ -6,6 +6,10 @@ PROJECT_DIR="$HOME/Development/newstrader"
 LOG_DIR="$PROJECT_DIR/logs"
 mkdir -p "$LOG_DIR"
 
+# Clean up old start/kill script logs (older than 5 days)
+find "$LOG_DIR" -name "start_newstrader_*.log" -type f -mtime +5 -delete
+find "$LOG_DIR" -name "kill_newstrader_*.log" -type f -mtime +5 -delete
+
 # Log file for today
 LOG_FILE="$LOG_DIR/kill_newstrader_$(date +\%Y\%m\%d).log"
 
