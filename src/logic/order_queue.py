@@ -59,10 +59,13 @@ class OrderQueue:
                     last_time = self.last_entry_order_time.get(ticker, 0)
                     time_since_last = current_time - last_time
                     
-                    if time_since_last < self.entry_order_delay:
+                    # Skip delay for the very first order of each ticker (when last_time is 0)
+                    if last_time > 0 and time_since_last < self.entry_order_delay:
                         delay_needed = self.entry_order_delay - time_since_last
                         logger.info(f"[{ticker}] Applying staggered delay: {delay_needed:.1f}s")
                         time.sleep(delay_needed)
+                    elif last_time == 0:
+                        logger.info(f"[{ticker}] First order for ticker - skipping staggered delay")
                     
                     # Update last entry order time
                     self.last_entry_order_time[ticker] = time.time()

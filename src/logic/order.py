@@ -214,6 +214,8 @@ class OrderStatusMixin(AbstractOrderExecutorMixin):
                 if filled > 0:
                     self._place_stop_loss()
                     self._place_take_profit()
+                    # CRITICAL FIX: Check position size after entry fills
+                    self.handle_max_position_size_check()
 
             case OrderType.EXIT:
                 if filled > 0:
@@ -577,6 +579,40 @@ class TraderMixin(AbstractOrderExecutorMixin):
         #     )
         #     self.execute_emergency_exit()
 
+    @queued_execution
+    def handle_max_position_size_check(self) -> None:
+        """
+        Check if the current position size has reached the maximum allowed size.
+        If so, cancel all pending entry orders to prevent further position growth.
+        
+        This method should be called whenever entry orders fill to ensure we don't
+        exceed the configured max_position_size due to rapid order placement.
+        """
+        current_size = self.position.size
+        max_size = self.assignment.max_position_size
+        
+        logger.debug(f"[{self.assignment.ticker}] Position size check: {current_size}/{max_size}")
+        
+        if current_size >= max_size:
+            # Find all pending entry orders
+            pending_entry_orders = [
+                order for order in self.position.pool.orders 
+                if order.order_type == OrderType.ENTRY
+            ]
+            
+            if pending_entry_orders:
+                logger.warning(
+                    f"[{self.assignment.ticker}] MAX POSITION SIZE REACHED! "
+                    f"Current: {current_size}, Max: {max_size}. "
+                    f"Cancelling {len(pending_entry_orders)} pending entry orders."
+                )
+                
+                for entry_order in pending_entry_orders:
+                    logger.info(f"[{self.assignment.ticker}] Cancelling entry order {entry_order.order_id} ({entry_order.size} shares @ ${entry_order.limit_price})")
+                    self.cancel_order(entry_order)
+            else:
+                logger.info(f"[{self.assignment.ticker}] Position size at max ({current_size}/{max_size}) but no pending entry orders to cancel.")
+
 
 class OrderExecutor(OrderStatusMixin, MarketDataMixin, TraderMixin):
     def __init__(
@@ -871,7 +907,7 @@ class OrderExecutor(OrderStatusMixin, MarketDataMixin, TraderMixin):
 
     def _emergency_exit_protocol(self, final: bool = False) -> None:
         """
-        Cancel all open orders.
+        Cancel all open orders and start aggressive emergency exit retry mechanism.
         """
         if not self.initialized:
             raise RuntimeError("OrderExecutor must be initialized before placing orders")
@@ -888,7 +924,7 @@ class OrderExecutor(OrderStatusMixin, MarketDataMixin, TraderMixin):
         )
         if self.position.true_share_count == 0:
             logger.debug("test emerg exit -- share count 0")
-            # Pass through the emergency exit protocol again to ensure that we have no open orderes
+            # Pass through the emergency exit protocol again to ensure that we have no open orders
             if not final:
                 logger.debug("test emerg exit -- not final")
                 return self._emergency_exit_protocol(final=True)
@@ -900,8 +936,26 @@ class OrderExecutor(OrderStatusMixin, MarketDataMixin, TraderMixin):
 
         self.is_emergency_exit = True
 
-        # Ensure that we have an emergency exit order in place for the entire
-        # position size
+        # Start the aggressive emergency exit retry loop instead of placing a single order
+        logger.warning(f"[{self.assignment.ticker}] Starting aggressive emergency exit protocol")
+        
+        # Start the retry loop in the TradeMonger using the dynamic method
+        if hasattr(self.tws_app, 'start_emergency_exit_retry_loop'):
+            retry_started = self.tws_app.start_emergency_exit_retry_loop()
+            if retry_started:
+                logger.warning(f"[{self.assignment.ticker}] Emergency exit retry loop started successfully")
+            else:
+                logger.error(f"[{self.assignment.ticker}] Failed to start emergency exit retry loop, using fallback")
+                self._place_single_emergency_exit_order()
+        else:
+            logger.warning(f"[{self.assignment.ticker}] TradeMonger doesn't support retry loop, using fallback single order")
+            # Fallback to placing a single order
+            self._place_single_emergency_exit_order()
+    
+    def _place_single_emergency_exit_order(self) -> None:
+        """
+        Fallback method to place a single emergency exit order (original behavior).
+        """
         exit_size = abs(self.position.true_share_count)
         
         # Determine emergency exit price for fast execution:

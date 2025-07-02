@@ -25,6 +25,7 @@ from loguru import logger
 from clients import MongerClient, MongerWrapper
 from clients.ibkr_wrapper import BID_ASK_REQ_ID, POSITION_PNL_REQ_ID, TRAILING_15_MIN_REQ_ID
 from schema import TraderAssignment
+from schema.enums import OrderType
 
 # Use correct imports from schema
 from src.schema.prediction import PriceDirection, Prediction # Import enum and Prediction model
@@ -256,12 +257,77 @@ class TradeMonger(MongerWrapper, MongerClient):
                 self.order_executor.handle_expired_positions()
                 self.order_executor.handle_dangling_shares()
                 self.order_executor.handle_pnl_checks()
+                # CRITICAL FIX: Check position size every second as safety net
+                self.order_executor.handle_max_position_size_check()
         except Exception as e:
             traceback.print_exc()
             logger.error(f"{self.ticker} -- UNHANDLED EXCEPTION IN POSITION MONITOR LOOP: {e}")
 
             # Restart the position monitor loop
             return self.position_monitor_loop()
+
+    # NOTE: EMERGENCY EXIT RETRY LOOP
+    async def emergency_exit_retry_loop(self):
+        """
+        Aggressive emergency exit retry loop that runs every 10 seconds.
+        Cancels existing emergency exit orders and places new ones at current bid/ask prices.
+        """
+        logger.warning(f"[{self.ticker}] Starting aggressive emergency exit retry loop")
+        retry_count = 0
+        
+        try:
+            while not self.stop_event.is_set() and self.order_executor.is_emergency_exit:
+                retry_count += 1
+                logger.warning(f"[{self.ticker}] Emergency exit retry attempt #{retry_count}")
+                
+                # Check if position is fully closed
+                if self.order_executor.position.true_share_count == 0:
+                    logger.success(f"[{self.ticker}] Position fully closed, stopping emergency exit retry loop")
+                    self.order_executor.is_emergency_exit = False
+                    break
+                
+                # Cancel existing emergency exit order if it exists
+                if emergency_exit_order := self.order_executor.position.emergency_exit_order:
+                    logger.warning(f"[{self.ticker}] Cancelling existing emergency exit order {emergency_exit_order.order_id}")
+                    self.order_executor.cancel_order(emergency_exit_order)
+                    # Give a moment for the cancellation to process
+                    try:
+                        await anyio.sleep(0.5)
+                    except anyio.get_cancelled_exc_class():
+                        break
+                
+                # Place new emergency exit order at current bid/ask price
+                exit_size = abs(self.order_executor.position.true_share_count)
+                if exit_size > 0:
+                    # Determine emergency exit price for fast execution:
+                    # For selling positions (long), use bid price for immediate execution  
+                    # For buying to cover (short), use ask price for immediate execution
+                    emergency_action = self.order_executor.position.exit_action
+                    emergency_price = (self.order_executor.market_data.bid 
+                                     if emergency_action.value == "SELL" 
+                                     else self.order_executor.market_data.ask)
+                    
+                    logger.warning(f"[{self.ticker}] Placing aggressive emergency exit order: "
+                                 f"{emergency_action.value} {exit_size} @ ${emergency_price:.2f}")
+                    
+                    self.order_executor.place_order(
+                        order_type=OrderType.EMERGENCY_EXIT,
+                        order_action=emergency_action,
+                        size=exit_size,
+                        price=emergency_price,
+                    )
+                
+                # Wait 10 seconds before next retry
+                try:
+                    await anyio.sleep(10)
+                except anyio.get_cancelled_exc_class():
+                    break
+                    
+        except Exception as e:
+            traceback.print_exc()
+            logger.error(f"{self.ticker} -- UNHANDLED EXCEPTION IN EMERGENCY EXIT RETRY LOOP: {e}")
+        
+        logger.warning(f"[{self.ticker}] Emergency exit retry loop finished after {retry_count} attempts")
 
     async def run_loops(self):
         async with anyio.create_task_group() as tg:
@@ -342,5 +408,23 @@ class TradeMonger(MongerWrapper, MongerClient):
             self.order_executor.execute_emergency_exit(final=final)
         else:
             logger.warning(f"[{self.ticker}] Could not trigger emergency exit: OrderExecutor not initialized.")
+
+    def start_emergency_exit_retry_loop(self):
+        """
+        Start the emergency exit retry loop dynamically.
+        """
+        if hasattr(self, 'task_group') and self.task_group:
+            try:
+                self.event_loop.call_soon_threadsafe(
+                    lambda: self.task_group.start_soon(self.emergency_exit_retry_loop)
+                )
+                logger.warning(f"[{self.ticker}] Emergency exit retry loop started dynamically")
+                return True
+            except Exception as e:
+                logger.error(f"[{self.ticker}] Failed to start emergency exit retry loop: {e}")
+                return False
+        else:
+            logger.warning(f"[{self.ticker}] Task group not available for emergency exit retry loop")
+            return False
 
     # TODO: Refactor into separate method

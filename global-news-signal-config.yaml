@@ -6,9 +6,9 @@
 signal_strategy:
   enable_predictions: false         # Disable traditional prediction signals
   enable_news_alerts: true          # Enable news alert signals from News.news_alert table
-  news_alert_lookback_minutes: 3    # Minutes to look back for unique ticker detection
+  news_alert_lookback_minutes: 2    # Minutes to look back for unique ticker detection
   enable_dynamic_discovery: true    # Enable dynamic ticker discovery from news alerts
-  staggered_order_delay: 5.0        # Seconds to wait between entry orders for same ticker
+  staggered_order_delay: 8.0        # Seconds to wait between entry orders for same ticker
 
 # Price-based position sizing tier list
 # Position sizes are determined by the stock price at the moment of signal detection
@@ -43,7 +43,7 @@ global_defaults:
   bullish_upper_bound: 1.01
   unit_position_size: 1000           # Default position size for all tickers (fallback)
   max_position_size: 3000            # Maximum position size for all tickers (fallback)
-  trade_threshold: 180              # Seconds between trades
+  trade_threshold: 120              # Seconds between trades
   max_hold_time: 10800              # Maximum hold time in seconds
   take_profit_target: 0.85         # Take profit target (0.2%)
   stop_loss_target: 0.30           # Stop loss target (0.5%)

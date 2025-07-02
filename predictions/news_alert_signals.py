@@ -243,13 +243,13 @@ class NewsAlertSignalProvider:
 
     def _run_schedule(self):
         """Runs the scheduled polling task."""
-        # Schedule to run every 2 seconds for very frequent news alert checking
-        schedule.every(2).seconds.do(self._poll_db)
+        # Schedule to run every 1 second for very frequent news alert checking
+        schedule.every(1).seconds.do(self._poll_db)
         
         # Schedule cleanup of old processed alerts every 10 minutes
         schedule.every(10).minutes.do(lambda: self.clear_old_signals(max_age_minutes=30))
         
-        logger.info("Scheduled ClickHouse news alert polling every 2 seconds.")
+        logger.info("Scheduled ClickHouse news alert polling every 1 second.")
         logger.info("Scheduled cleanup of old processed alerts every 10 minutes.")
 
         while not self._stop_event.is_set():
