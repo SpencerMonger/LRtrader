@@ -276,12 +276,13 @@ class TradeMonger(MongerWrapper, MongerClient):
         retry_count = 0
         
         try:
-            while not self.stop_event.is_set() and self.order_executor.is_emergency_exit:
+            while self.order_executor.is_emergency_exit:
                 retry_count += 1
                 logger.warning(f"[{self.ticker}] Emergency exit retry attempt #{retry_count}")
                 
                 # Check if position is fully closed
-                if self.order_executor.position.true_share_count == 0:
+                current_position = self.order_executor.position.true_share_count
+                if current_position == 0:
                     logger.success(f"[{self.ticker}] Position fully closed, stopping emergency exit retry loop")
                     self.order_executor.is_emergency_exit = False
                     break
@@ -297,25 +298,51 @@ class TradeMonger(MongerWrapper, MongerClient):
                         break
                 
                 # Place new emergency exit order at current bid/ask price
-                exit_size = abs(self.order_executor.position.true_share_count)
+                exit_size = abs(current_position)
                 if exit_size > 0:
                     # Determine emergency exit price for fast execution:
                     # For selling positions (long), use bid price for immediate execution  
                     # For buying to cover (short), use ask price for immediate execution
                     emergency_action = self.order_executor.position.exit_action
-                    emergency_price = (self.order_executor.market_data.bid 
-                                     if emergency_action.value == "SELL" 
-                                     else self.order_executor.market_data.ask)
                     
-                    logger.warning(f"[{self.ticker}] Placing aggressive emergency exit order: "
-                                 f"{emergency_action.value} {exit_size} @ ${emergency_price:.2f}")
+                    # Handle case where position is closed and exit_action is None
+                    if emergency_action is None:
+                        logger.warning(f"[{self.ticker}] Position exit_action is None, position may have been closed")
+                        break
                     
-                    self.order_executor.place_order(
-                        order_type=OrderType.EMERGENCY_EXIT,
-                        order_action=emergency_action,
-                        size=exit_size,
-                        price=emergency_price,
-                    )
+                    # Get current market data
+                    bid_price = self.order_executor.market_data.bid
+                    ask_price = self.order_executor.market_data.ask
+                    
+                    # Use bid for selling, ask for buying
+                    emergency_price = bid_price if emergency_action.value == "SELL" else ask_price
+                    
+                    # Ensure we have valid pricing
+                    if emergency_price and emergency_price > 0:
+                        logger.warning(f"[{self.ticker}] Placing aggressive emergency exit order: "
+                                     f"{emergency_action.value} {exit_size} @ ${emergency_price:.2f}")
+                        
+                        self.order_executor.place_order(
+                            order_type=OrderType.EMERGENCY_EXIT,
+                            order_action=emergency_action,
+                            size=exit_size,
+                            price=emergency_price,
+                        )
+                    else:
+                        logger.error(f"[{self.ticker}] Invalid pricing for emergency exit: bid={bid_price}, ask={ask_price}")
+                        # Use a fallback price based on last known price or market price
+                        fallback_price = self.order_executor.market_data.last_price or 1.0
+                        logger.warning(f"[{self.ticker}] Using fallback price ${fallback_price:.2f} for emergency exit")
+                        
+                        self.order_executor.place_order(
+                            order_type=OrderType.EMERGENCY_EXIT,
+                            order_action=emergency_action,
+                            size=exit_size,
+                            price=fallback_price,
+                        )
+                else:
+                    logger.warning(f"[{self.ticker}] Exit size is 0, position may have been closed")
+                    break
                 
                 # Wait 10 seconds before next retry
                 try:
@@ -326,6 +353,8 @@ class TradeMonger(MongerWrapper, MongerClient):
         except Exception as e:
             traceback.print_exc()
             logger.error(f"{self.ticker} -- UNHANDLED EXCEPTION IN EMERGENCY EXIT RETRY LOOP: {e}")
+        finally:
+            self._emergency_retry_active = False
         
         logger.warning(f"[{self.ticker}] Emergency exit retry loop finished after {retry_count} attempts")
 
@@ -413,18 +442,31 @@ class TradeMonger(MongerWrapper, MongerClient):
         """
         Start the emergency exit retry loop dynamically.
         """
+        # Check if retry loop is already active - CRITICAL: Do this check BEFORE adding task
+        if hasattr(self, '_emergency_retry_active') and self._emergency_retry_active:
+            logger.warning(f"[{self.ticker}] Emergency exit retry loop already active, not starting another")
+            return True
+        
+        # Set the flag IMMEDIATELY to prevent race conditions
+        self._emergency_retry_active = True
+            
         if hasattr(self, 'task_group') and self.task_group:
             try:
+                # Simple approach: just try to add the task
                 self.event_loop.call_soon_threadsafe(
                     lambda: self.task_group.start_soon(self.emergency_exit_retry_loop)
                 )
-                logger.warning(f"[{self.ticker}] Emergency exit retry loop started dynamically")
+                logger.warning(f"[{self.ticker}] Emergency exit retry loop startup requested")
                 return True
             except Exception as e:
                 logger.error(f"[{self.ticker}] Failed to start emergency exit retry loop: {e}")
+                # Reset flag on failure
+                self._emergency_retry_active = False
                 return False
         else:
-            logger.warning(f"[{self.ticker}] Task group not available for emergency exit retry loop")
+            logger.warning(f"[{self.ticker}] Task group not available, TradeMonger doesn't support retry loop")
+            # Reset flag on failure
+            self._emergency_retry_active = False
             return False
 
     # TODO: Refactor into separate method

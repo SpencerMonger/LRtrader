@@ -305,7 +305,14 @@ class OrderStatusMixin(AbstractOrderExecutorMixin):
                     self.cancel_order(sl_order)
                 for tp_order in self.position.take_profit_orders:
                     self.cancel_order(tp_order)
-                self.is_emergency_exit = False
+                
+                # Only set emergency exit to False if position is FULLY closed
+                if self.position.true_share_count == 0:
+                    logger.info(f"[{self.assignment.ticker}] Position fully closed after emergency exit fill, ending emergency exit mode")
+                    self.is_emergency_exit = False
+                else:
+                    logger.warning(f"[{self.assignment.ticker}] Emergency exit order filled but position still has {self.position.true_share_count} shares remaining")
+                    # Keep is_emergency_exit = True so retry loop continues
 
             case OrderType.DANGLING_SHARES:
                  # If a dangling shares order fills and the *internal* position is now zero,
@@ -876,9 +883,19 @@ class OrderExecutor(OrderStatusMixin, MarketDataMixin, TraderMixin):
         delta = self.position.true_share_count - self.position.relevant_position_size
         order_direction = OrderAction.BUY if delta < 0 else OrderAction.SELL
         order_size = abs(delta)
+        
         # Determine spread strategy: BEST = True, WORST = False
         best_spread = self.assignment.spread_strategy.upper() == "BEST"
-        price = self.market_data.order_book.get_exit_price(self.position.side, best_spread)
+        
+        # Use correct pricing method based on order direction
+        if order_direction == OrderAction.BUY:
+            # BUY orders should use entry pricing with BULLISH flag
+            price = self.market_data.order_book.get_entry_price(PriceDirection.BULLISH, best_spread)
+            logger.debug(f"[{self.assignment.ticker}] Dangling shares BUY order using ENTRY pricing (BULLISH): ${price:.2f}")
+        else:
+            # SELL orders should use exit pricing with position side
+            price = self.market_data.order_book.get_exit_price(self.position.side, best_spread)
+            logger.debug(f"[{self.assignment.ticker}] Dangling shares SELL order using EXIT pricing ({self.position.side}): ${price:.2f}")
 
         # Check if a dangling shares order is already active
         if existing_order := self.position.dangling_shares_order:
@@ -897,7 +914,7 @@ class OrderExecutor(OrderStatusMixin, MarketDataMixin, TraderMixin):
             return # Exit whether cancelled, waiting for status update, or too young. Let next cycle handle placement if needed.
         else:
             # No active order found in pool, place a new one
-            logger.info(f"[{self.assignment.ticker}] No active dangling order found. Placing new one: {order_direction.value} {order_size} @ {price}")
+            logger.info(f"[{self.assignment.ticker}] No active dangling order found. Placing new one: {order_direction.value} {order_size} @ ${price:.2f}")
             self.place_order(
                 order_type=OrderType.DANGLING_SHARES,
                 order_action=order_direction,
@@ -911,48 +928,72 @@ class OrderExecutor(OrderStatusMixin, MarketDataMixin, TraderMixin):
         """
         if not self.initialized:
             raise RuntimeError("OrderExecutor must be initialized before placing orders")
-        self.tws_app.is_active = False
 
-        # Ensure all open orders are cancelled
-        for order_id in self.position.open_orders:
-            order = self.position.pool[order_id]
-            if order.order_type != OrderType.EMERGENCY_EXIT:
-                self.cancel_order(order)
-
-        logger.debug(
-            f"({self.assignment.ticker}) current shares remaining: {self.position.true_share_count}"
-        )
-        if self.position.true_share_count == 0:
-            logger.debug("test emerg exit -- share count 0")
-            # Pass through the emergency exit protocol again to ensure that we have no open orders
-            if not final:
-                logger.debug("test emerg exit -- not final")
-                return self._emergency_exit_protocol(final=True)
-
-            logger.debug("test emerg exit -- final")
-            self.is_emergency_exit = False
-            self.tws_app.stop(skip_emerg=True)
-            return
-
-        self.is_emergency_exit = True
-
-        # Start the aggressive emergency exit retry loop instead of placing a single order
-        logger.warning(f"[{self.assignment.ticker}] Starting aggressive emergency exit protocol")
-        
-        # Start the retry loop in the TradeMonger using the dynamic method
-        if hasattr(self.tws_app, 'start_emergency_exit_retry_loop'):
-            retry_started = self.tws_app.start_emergency_exit_retry_loop()
-            if retry_started:
-                logger.warning(f"[{self.assignment.ticker}] Emergency exit retry loop started successfully")
-            else:
-                logger.error(f"[{self.assignment.ticker}] Failed to start emergency exit retry loop, using fallback")
-                self._place_single_emergency_exit_order()
+        # Add thread-safety to prevent multiple simultaneous calls
+        if hasattr(self, '_emergency_exit_lock'):
+            if self._emergency_exit_lock:
+                logger.debug(f"[{self.assignment.ticker}] Emergency exit protocol already running, skipping duplicate call")
+                return
         else:
-            logger.warning(f"[{self.assignment.ticker}] TradeMonger doesn't support retry loop, using fallback single order")
-            # Fallback to placing a single order
-            self._place_single_emergency_exit_order()
-    
-    def _place_single_emergency_exit_order(self) -> None:
+            self._emergency_exit_lock = False
+
+        self._emergency_exit_lock = True
+
+        try:
+            self.tws_app.is_active = False
+
+            # Ensure all open orders are cancelled
+            for order_id in self.position.open_orders:
+                order = self.position.pool[order_id]
+                if order.order_type != OrderType.EMERGENCY_EXIT:
+                    self.cancel_order(order)
+
+            logger.debug(
+                f"({self.assignment.ticker}) current shares remaining: {self.position.true_share_count}"
+            )
+
+            logger.warning(
+                f"[{self.assignment.ticker}] Emergency exit protocol called: final={final}, "
+                f"is_emergency_exit={self.is_emergency_exit}, true_share_count={self.position.true_share_count}"
+            )
+
+            # If position is already closed, just set the flag and return
+            if self.position.true_share_count == 0:
+                logger.info(f"[{self.assignment.ticker}] Position already closed, setting emergency exit flag to False")
+                self.is_emergency_exit = False
+                self.tws_app.stop()
+                return
+
+            # Set emergency exit flag
+            self.is_emergency_exit = True
+
+            # Try to start the retry loop if not already running
+            retry_loop_started = False
+            if hasattr(self.tws_app, '_emergency_retry_active') and self.tws_app._emergency_retry_active:
+                logger.info(f"[{self.assignment.ticker}] Emergency exit retry loop already running")
+                retry_loop_started = True
+            else:
+                logger.info(f"[{self.assignment.ticker}] Starting emergency exit retry loop...")
+                try:
+                    retry_loop_started = self.tws_app.start_emergency_exit_retry_loop()
+                    if retry_loop_started:
+                        # Don't place initial order here - let the retry loop handle all orders
+                        logger.info(f"[{self.assignment.ticker}] Emergency exit retry loop started successfully")
+                    else:
+                        logger.error(f"[{self.assignment.ticker}] Failed to start emergency exit retry loop")
+                except Exception as e:
+                    logger.error(f"[{self.assignment.ticker}] Exception starting emergency exit retry loop: {e}")
+                    retry_loop_started = False
+
+            # If retry loop couldn't start, place a fallback emergency exit order
+            if not retry_loop_started:
+                logger.warning(f"[{self.assignment.ticker}] Retry loop failed to start, placing fallback emergency exit order")
+                self._place_emergency_exit_order()
+
+        finally:
+            self._emergency_exit_lock = False
+
+    def _place_emergency_exit_order(self) -> None:
         """
         Fallback method to place a single emergency exit order (original behavior).
         """
