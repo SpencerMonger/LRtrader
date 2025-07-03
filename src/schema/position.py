@@ -529,21 +529,56 @@ class Position(BaseModel):
         self, ticker: str, contract_id: int, position: float, avg_price: float
     ) -> None:
         """
-        Handle a position update event from TWS.
+        Handle position updates from TWS.
+        
+        This method updates the TWS position tracking and triggers position limit checks
+        when necessary, but does NOT automatically synchronize internal position to avoid
+        creating feedback loops that inflate the internal position.
         """
-        # Filter only for the position we are tracking
-        if ticker != self.assignment.ticker:
-            return
-
-        # Update the true share count
+        # Store original position for comparison
+        original_internal_position = self.size
         original_true_share_count = self.true_share_count
-        self.true_share_count = int(position)
+        
+        # Update TWS position data
         self._contract_id = contract_id
-
+        self.true_share_count = int(position)
+        
         logger.info(
-            f"UPDATE [{self.assignment.ticker}] -- TWS Share Count: "
-            f"{self.true_share_count} @ {avg_price} (Internal size: {self.size})"
+            f"UPDATE [{self.assignment.ticker}] -- "
+            f"TWS Share Count: {self.true_share_count} @ {avg_price} "
+            f"(Internal size: {self.size})"
         )
+        
+        # Calculate position mismatch
+        position_mismatch = abs(self.true_share_count - self.size)
+        
+        # CRITICAL FIX: Only log mismatches, don't automatically synchronize
+        # Automatic synchronization was causing internal position inflation
+        if position_mismatch > 0:
+            logger.warning(
+                f"POSITION MISMATCH [{self.assignment.ticker}] -- "
+                f"TWS Position: {self.true_share_count}, Internal Position: {self.size}, "
+                f"Mismatch: {position_mismatch} shares. "
+                f"NOT auto-synchronizing to prevent position inflation."
+            )
+            
+            # If TWS position exceeds limits, trigger position limit check to cancel pending orders
+            if abs(self.true_share_count) > self.assignment.max_position_size:
+                logger.warning(
+                    f"[{self.assignment.ticker}] TWS position ({abs(self.true_share_count)}) exceeds max_position_size ({self.assignment.max_position_size}). "
+                    f"Triggering position limit check to cancel pending orders."
+                )
+                
+                # Trigger position limit check to cancel any pending entry orders
+                if hasattr(self, '_position_limit_check_callback') and self._position_limit_check_callback:
+                    logger.debug(f"[{self.assignment.ticker}] Triggering position limit check for oversized TWS position")
+                    self._position_limit_check_callback()
+            
+            # Always trigger position limit check when there's a mismatch
+            # This ensures position limits are enforced based on current state
+            if hasattr(self, '_position_limit_check_callback') and self._position_limit_check_callback:
+                logger.debug(f"[{self.assignment.ticker}] Triggering position limit check due to position mismatch")
+                self._position_limit_check_callback()
 
         # If TWS reports position is now zero, ensure TP/SL orders in the pool are marked for cancellation.
         # We rely solely on true_share_count from TWS as the trigger.
@@ -565,6 +600,13 @@ class Position(BaseModel):
                  logger.info(f"[{self.assignment.ticker}] Marked {orders_marked} bracket orders for cancellation.")
             else:
                  logger.info(f"[{self.assignment.ticker}] TWS position is zero, but no active TP/SL orders found in pool to mark for cancellation.")
+    
+    def set_position_limit_check_callback(self, callback):
+        """
+        Set a callback function to be called when position synchronization occurs.
+        This allows the OrderExecutor to trigger position limit checks after sync.
+        """
+        self._position_limit_check_callback = callback
 
     def handle_submitted(
         self, order_id: int, filled: float, avg_price: float
@@ -583,11 +625,10 @@ class Position(BaseModel):
 
         match order.order_type:
             case OrderType.ENTRY:
-                # If no shares have filled yet, then we can just ignore the order
-
-                if filled > 0:
-                    # Ensure that these partial shares are added to the trade
-                    self.add_to_position(order_id, order.action, filled, avg_price)
+                # CRITICAL FIX: Do NOT call add_to_position here for partial fills
+                # Only the FILLED handler should update position tracking to avoid double-counting
+                # The SUBMITTED handler should only update the order state in the pool
+                pass
 
             case OrderType.EXIT:
                 # Ensure that we have a trade to close out
@@ -599,25 +640,27 @@ class Position(BaseModel):
                 # Update the order in the pending pool and ensure it is associated with the trade
                 self.trade_to_close.add_exit_order(order)
 
-                # If we have a partial fill, we need to make sure we update the order in the pool,
-                # and we will need to update the take profit and stop loss orders as well
-                if filled > 0:
-                    self.remove_from_position(order_id, filled, avg_price)
+                # CRITICAL FIX: Do NOT call remove_from_position here for partial fills
+                # Only the FILLED handler should update position tracking to avoid double-counting
+                pass
 
             case OrderType.TAKE_PROFIT:
-                if filled > 0:
-                    self.remove_from_position(order_id, filled, avg_price, is_take_profit=True)
+                # CRITICAL FIX: Do NOT call remove_from_position here for partial fills
+                # Only the FILLED handler should update position tracking to avoid double-counting
+                pass
 
             case OrderType.STOP_LOSS:
                 # NOTE: We want to fire the cool trigger here, since this will event will
                 # be recieved as soon as the auxPrice is hit (even if no shares have filled)
                 self.cooldown_trigger()
-                if filled > 0:
-                    self.remove_from_position(order_id, filled, avg_price, is_stop_loss=True)
+                # CRITICAL FIX: Do NOT call remove_from_position here for partial fills
+                # Only the FILLED handler should update position tracking to avoid double-counting
+                pass
 
             case OrderType.EMERGENCY_EXIT:
-                if filled > 0:
-                    self.remove_from_position(order_id, filled, avg_price)
+                # CRITICAL FIX: Do NOT call remove_from_position here for partial fills
+                # Only the FILLED handler should update position tracking to avoid double-counting
+                pass
             case OrderType.DANGLING_SHARES:
                 pass
             case _:
@@ -643,7 +686,9 @@ class Position(BaseModel):
 
         match cancelled_order.order_type:
             case OrderType.ENTRY:
-                pass
+                # CRITICAL FIX: Track partial fills from cancelled ENTRY orders
+                if filled > 0:
+                    self.add_to_position(order_id, cancelled_order.action, filled, avg_price)
 
             case OrderType.EXIT:
                 # We need to remove the exit order from the position

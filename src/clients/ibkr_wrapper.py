@@ -238,6 +238,12 @@ class MongerWrapper(EWrapper):
         position_val = float(position)
         logger.debug(f"[TWS Callback] Received position update for {ticker_symbol}: Size={position_val}, AvgCost={avgCost}, Account={account}")
         
+        # CRITICAL FIX: Only forward position updates for the ticker this TradeMonger instance is responsible for
+        # This prevents cross-ticker position contamination where BCAB positions get assigned to NVDA, etc.
+        if ticker_symbol != self.assignment.ticker:
+            logger.debug(f"[TWS Callback] Ignoring position update for {ticker_symbol} - this TradeMonger handles {self.assignment.ticker}")
+            return
+        
         if hasattr(self, 'order_executor') and hasattr(self.order_executor, 'position'):
             logger.debug(f"[TWS Callback] Forwarding position update for {ticker_symbol} to Position object.")
             self.order_executor.position.handle_position_update(

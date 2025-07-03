@@ -8,7 +8,7 @@ signal_strategy:
   enable_news_alerts: true          # Enable news alert signals from News.news_alert table
   news_alert_lookback_minutes: 2    # Minutes to look back for unique ticker detection
   enable_dynamic_discovery: true    # Enable dynamic ticker discovery from news alerts
-  staggered_order_delay: 8.0        # Seconds to wait between entry orders for same ticker
+  staggered_order_delay: 5.0        # Seconds to wait between entry orders for same ticker
 
 # Price-based position sizing tier list
 # Position sizes are determined by the stock price at the moment of signal detection

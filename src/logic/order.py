@@ -465,18 +465,28 @@ class TraderMixin(AbstractOrderExecutorMixin):
         logger.debug(f"[{self.assignment.ticker}] Predicates passed: {predicates_passed}")
 
         if predicates_passed:
+            # CRITICAL FIX: Check if we're at the max position limit before placing any orders
+            if self.position.size >= self.assignment.max_position_size:
+                logger.info(
+                    f"[{self.assignment.ticker}] Position at maximum limit. "
+                    f"Current: {self.position.size}, Max: {self.assignment.max_position_size}. "
+                    f"Skipping order placement."
+                )
+                return
+
             # Calculate position size based on CURRENT position state
             max_position_size = self.assignment.max_position_size
             delta_to_max = max_position_size - self.position.size
             position_size = min(delta_to_max, self.assignment.position_size)
 
-            if position_size == 0:
+            if position_size <= 0:
                 logger.debug(f"[{self.assignment.ticker}] Position size is 0, skipping order placement.")
                 return
 
             # Get FRESH market data at the time of actual order placement
             # This is critical for fast-moving stocks where price changes rapidly
             best_spread = self.assignment.spread_strategy.upper() == "BEST"
+            entry_price = self.assignment.spread_strategy.upper() == "BEST"
             entry_price = self.market_data.order_book.get_entry_price(prediction.flag, best_spread)
             
             logger.info(f"[{self.assignment.ticker}] FRESH ORDER PLACEMENT: Size={position_size}, Price=${entry_price:.2f}, Strategy={self.assignment.spread_strategy}, Current Position={self.position.size}/{max_position_size}")
@@ -589,17 +599,23 @@ class TraderMixin(AbstractOrderExecutorMixin):
     @queued_execution
     def handle_max_position_size_check(self) -> None:
         """
-        Check if the current position size has reached the maximum allowed size.
-        If so, cancel all pending entry orders to prevent further position growth.
-        
-        This method should be called whenever entry orders fill to ensure we don't
-        exceed the configured max_position_size due to rapid order placement.
+        Check if the current position size exceeds the maximum allowed size.
+        If it does, cancel any pending entry orders.
         """
         current_size = self.position.size
+        tws_size = self.position.true_share_count
         max_size = self.assignment.max_position_size
         
-        logger.debug(f"[{self.assignment.ticker}] Position size check: {current_size}/{max_size}")
+        logger.debug(f"[{self.assignment.ticker}] Position size check: Internal={current_size}, TWS={tws_size}, Max={max_size}")
         
+        # Log if TWS position exceeds limits but don't trigger emergency exit
+        if tws_size > max_size:
+            logger.warning(
+                f"[{self.assignment.ticker}] TWS position ({tws_size}) exceeds max limit ({max_size}). "
+                f"This indicates position synchronization issues but will not trigger emergency exit."
+            )
+        
+        # Normal position limit check for internal position
         if current_size >= max_size:
             # Find all pending entry orders
             pending_entry_orders = [
@@ -619,6 +635,8 @@ class TraderMixin(AbstractOrderExecutorMixin):
                     self.cancel_order(entry_order)
             else:
                 logger.info(f"[{self.assignment.ticker}] Position size at max ({current_size}/{max_size}) but no pending entry orders to cancel.")
+        else:
+            logger.debug(f"[{self.assignment.ticker}] Position within limits: {current_size}/{max_size}")
 
 
 class OrderExecutor(OrderStatusMixin, MarketDataMixin, TraderMixin):
@@ -675,6 +693,9 @@ class OrderExecutor(OrderStatusMixin, MarketDataMixin, TraderMixin):
         self.order_id_manager = OrderIdManager(app)
         self.initialized = True
         self.order_queue.start()
+        
+        # Set position limit check callback for position synchronization
+        self.position.set_position_limit_check_callback(self.handle_max_position_size_check)
 
     def shutdown(self):
         """
@@ -706,6 +727,31 @@ class OrderExecutor(OrderStatusMixin, MarketDataMixin, TraderMixin):
 
         if self.is_emergency_exit and order_type != OrderType.EMERGENCY_EXIT:
             return
+
+        # CRITICAL FIX: Check position size limit before placing any entry orders
+        if order_type == OrderType.ENTRY and order_action == OrderAction.BUY:
+            current_position = abs(self.position.size)
+            projected_position = current_position + size
+            
+            if projected_position > self.assignment.max_position_size:
+                logger.warning(
+                    f"[{self.assignment.ticker}] ORDER BLOCKED - Position size limit exceeded! "
+                    f"Current: {current_position}, Order size: {size}, "
+                    f"Projected: {projected_position}, Max: {self.assignment.max_position_size}. "
+                    f"Skipping order placement."
+                )
+                return
+        
+        # CRITICAL FIX: Also check TWS position to prevent orders when TWS position exceeds limit
+        if order_type == OrderType.ENTRY and order_action == OrderAction.BUY:
+            current_tws_position = abs(self.position.true_share_count)
+            if current_tws_position >= self.assignment.max_position_size:
+                logger.warning(
+                    f"[{self.assignment.ticker}] ORDER BLOCKED - TWS position at/above limit! "
+                    f"TWS position: {current_tws_position}, Max: {self.assignment.max_position_size}. "
+                    f"Skipping order placement."
+                )
+                return
 
         order_id = self.order_id_manager.next_id()
         order = MongerOrder(
@@ -867,6 +913,11 @@ class OrderExecutor(OrderStatusMixin, MarketDataMixin, TraderMixin):
     def _dangling_shares_protocol(self) -> None:
         """
         Place an order to cancel out dangling shares.
+        
+        CRITICAL: This protocol should only place BUY orders to acquire missing shares
+        when internal position > TWS position. It should NEVER place SELL orders when
+        TWS position > internal position, as this indicates legitimate fills that 
+        weren't tracked properly due to race conditions.
         """
         if not self.initialized:
             raise RuntimeError("OrderExecutor must be initialized before placing orders")
@@ -879,23 +930,65 @@ class OrderExecutor(OrderStatusMixin, MarketDataMixin, TraderMixin):
                  self.cancel_order(existing_order)
              return
 
-        # Mismatch exists, calculate required order details for potential placement
+        # Calculate the mismatch
         delta = self.position.true_share_count - self.position.relevant_position_size
-        order_direction = OrderAction.BUY if delta < 0 else OrderAction.SELL
+        
+        # CRITICAL FIX: Only handle cases where internal position > TWS position
+        # This means we have internal trades that weren't reflected in TWS (rare)
+        if delta >= 0:
+            # TWS position >= internal position
+            # This indicates legitimate fills that weren't tracked internally due to race conditions
+            # DO NOT place SELL orders - this would sell legitimate positions
+            logger.warning(
+                f"[{self.assignment.ticker}] TWS position ({self.position.true_share_count}) >= "
+                f"internal position ({self.position.relevant_position_size}). "
+                f"This indicates legitimate fills that weren't tracked internally. "
+                f"NOT placing dangling shares SELL order - this would be incorrect."
+            )
+            
+            # Cancel any existing dangling shares order since the mismatch is not actionable
+            if existing_order := self.position.dangling_shares_order:
+                logger.info(f"[{self.assignment.ticker}] Cancelling inappropriate dangling shares order {existing_order.order_id}.")
+                self.cancel_order(existing_order)
+            return
+
+        # delta < 0: internal position > TWS position
+        # This is the only case where we should place a BUY order to acquire missing shares
+        order_direction = OrderAction.BUY
         order_size = abs(delta)
+        
+        # CRITICAL FIX: Check if placing this order would exceed max position size limit
+        # The dangling shares protocol should not violate position sizing rules
+        projected_tws_position = self.position.true_share_count + order_size
+        if projected_tws_position > self.assignment.max_position_size:
+            logger.warning(
+                f"[{self.assignment.ticker}] DANGLING SHARES ORDER BLOCKED! "
+                f"Placing BUY order for {order_size} shares would exceed max position size limit. "
+                f"Current TWS position: {self.position.true_share_count}, "
+                f"Projected position: {projected_tws_position}, "
+                f"Max allowed: {self.assignment.max_position_size}. "
+                f"Skipping dangling shares order to prevent position size violation."
+            )
+            
+            # Cancel any existing dangling shares order since we can't place a valid one
+            if existing_order := self.position.dangling_shares_order:
+                logger.info(f"[{self.assignment.ticker}] Cancelling existing dangling shares order {existing_order.order_id} due to position size limits.")
+                self.cancel_order(existing_order)
+            return
+        
+        logger.info(
+            f"[{self.assignment.ticker}] Internal position ({self.position.relevant_position_size}) > "
+            f"TWS position ({self.position.true_share_count}). "
+            f"Placing BUY order for {order_size} missing shares. "
+            f"Projected TWS position: {projected_tws_position}/{self.assignment.max_position_size}"
+        )
         
         # Determine spread strategy: BEST = True, WORST = False
         best_spread = self.assignment.spread_strategy.upper() == "BEST"
         
-        # Use correct pricing method based on order direction
-        if order_direction == OrderAction.BUY:
-            # BUY orders should use entry pricing with BULLISH flag
-            price = self.market_data.order_book.get_entry_price(PriceDirection.BULLISH, best_spread)
-            logger.debug(f"[{self.assignment.ticker}] Dangling shares BUY order using ENTRY pricing (BULLISH): ${price:.2f}")
-        else:
-            # SELL orders should use exit pricing with position side
-            price = self.market_data.order_book.get_exit_price(self.position.side, best_spread)
-            logger.debug(f"[{self.assignment.ticker}] Dangling shares SELL order using EXIT pricing ({self.position.side}): ${price:.2f}")
+        # BUY orders should use entry pricing with BULLISH flag
+        price = self.market_data.order_book.get_entry_price(PriceDirection.BULLISH, best_spread)
+        logger.debug(f"[{self.assignment.ticker}] Dangling shares BUY order using ENTRY pricing (BULLISH): ${price:.2f}")
 
         # Check if a dangling shares order is already active
         if existing_order := self.position.dangling_shares_order:
@@ -914,7 +1007,7 @@ class OrderExecutor(OrderStatusMixin, MarketDataMixin, TraderMixin):
             return # Exit whether cancelled, waiting for status update, or too young. Let next cycle handle placement if needed.
         else:
             # No active order found in pool, place a new one
-            logger.info(f"[{self.assignment.ticker}] No active dangling order found. Placing new one: {order_direction.value} {order_size} @ ${price:.2f}")
+            logger.info(f"[{self.assignment.ticker}] No active dangling order found. Placing new BUY order: {order_size} @ ${price:.2f}")
             self.place_order(
                 order_type=OrderType.DANGLING_SHARES,
                 order_action=order_direction,
@@ -940,7 +1033,9 @@ class OrderExecutor(OrderStatusMixin, MarketDataMixin, TraderMixin):
         self._emergency_exit_lock = True
 
         try:
-            self.tws_app.is_active = False
+            # CRITICAL FIX: Don't disable tws_app.is_active here - it causes the app to crash
+            # before the emergency exit can complete. The retry loop needs the app to be active.
+            # self.tws_app.is_active = False  # REMOVED - this was causing crashes
 
             # Ensure all open orders are cancelled
             for order_id in self.position.open_orders:
@@ -961,7 +1056,9 @@ class OrderExecutor(OrderStatusMixin, MarketDataMixin, TraderMixin):
             if self.position.true_share_count == 0:
                 logger.info(f"[{self.assignment.ticker}] Position already closed, setting emergency exit flag to False")
                 self.is_emergency_exit = False
-                self.tws_app.stop()
+                # Only stop the app if position is fully closed
+                if hasattr(self.tws_app, 'stop'):
+                    self.tws_app.stop()
                 return
 
             # Set emergency exit flag
