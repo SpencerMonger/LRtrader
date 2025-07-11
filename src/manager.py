@@ -268,6 +268,41 @@ class MongerManager:
         if not self.running:
             return
 
+        # CRITICAL: Log who called stop() with full stack trace
+        import traceback
+        import inspect
+        from datetime import datetime
+        
+        # Get the complete call stack
+        stack = traceback.format_stack()
+        caller_info = inspect.stack()[1]
+        
+        # Log to multiple places to prevent silent failures
+        logger.critical("="*80)
+        logger.critical("EMERGENCY SHUTDOWN INITIATED")
+        logger.critical(f"Called from: {caller_info.filename}:{caller_info.lineno} in {caller_info.function}")
+        logger.critical("Full call stack:")
+        for frame in stack:
+            logger.critical(frame.strip())
+        logger.critical("="*80)
+        
+        # Also write directly to file as backup
+        try:
+            with open("logs/emergency_shutdown.log", "a") as f:
+                f.write(f"\n{'='*80}\n")
+                f.write(f"EMERGENCY SHUTDOWN at {datetime.now()}\n")
+                f.write(f"Called from: {caller_info.filename}:{caller_info.lineno} in {caller_info.function}\n")
+                f.write("Full call stack:\n")
+                for frame in stack:
+                    f.write(frame)
+                f.write(f"{'='*80}\n")
+        except Exception as e:
+            print(f"Failed to write emergency shutdown log: {e}")
+        
+        # Also print to stdout as last resort
+        print(f"EMERGENCY SHUTDOWN INITIATED at {datetime.now()}")
+        print(f"Called from: {caller_info.filename}:{caller_info.lineno}")
+
         self.running = False
         logger.info("Stopping The Trade Monger Manager")
         self._stopped_event.set()

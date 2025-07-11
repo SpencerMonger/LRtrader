@@ -902,6 +902,26 @@ class OrderExecutor(OrderStatusMixin, MarketDataMixin, TraderMixin):
                             continue
 
             if stop_loss_price and stop_loss_size and not trade.stop_loss_order:
+                # CRITICAL FIX: Check if there's already a pending stop loss order in the pool
+                # This prevents race conditions where multiple market data updates queue
+                # stop loss placements before the first one completes and sets trade.stop_loss_order
+                pending_stop_loss = None
+                for order in self.position.pool.orders:
+                    if order.order_type == OrderType.STOP_LOSS:
+                        # Check if this stop loss order belongs to the current trade
+                        # by finding the trade that has this order as its stop_loss_order
+                        for other_trade in self.position.trades.values():
+                            if other_trade.stop_loss_order and other_trade.stop_loss_order.order_id == order.order_id:
+                                if other_trade.trade_id == trade.trade_id:
+                                    pending_stop_loss = order
+                                    break
+                        if pending_stop_loss:
+                            break
+                
+                if pending_stop_loss:
+                    logger.debug(f"[{self.assignment.ticker}] Stop loss order {pending_stop_loss.order_id} already pending for trade {trade.trade_id}, skipping duplicate")
+                    continue
+                    
                 self.place_order(
                     order_type=OrderType.STOP_LOSS,
                     order_action=self.position.exit_action,

@@ -29,7 +29,7 @@ logger.add(sys.stderr, level="TRACE") # Add back stderr handler with TRACE level
 
 # Configure file logging with daily rotation and 5-day retention
 log_file_path = f"logs/newstrader_run_{{time:YYYYMMDD}}.log"
-logger.add(log_file_path, rotation="1 day", retention=5, level="INFO", format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | {name}:{function}:{line} - {message}", backtrace=True, diagnose=True)
+logger.add(log_file_path, rotation="1 day", retention=5, level="TRACE", format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | {name}:{function}:{line} - {message}", backtrace=True, diagnose=True)
 logger.info("File logging configured. Log file: {}", log_file_path.format(time=datetime.now()))
 
 def parse_arguments() -> argparse.Namespace:
