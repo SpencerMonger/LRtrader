@@ -533,30 +533,43 @@ class TraderMixin(AbstractOrderExecutorMixin):
     @queued_execution
     def handle_dangling_shares(self):
         """
-        Handle dangling shares.
-        """
-        # Add verbose logging to check values
-        logger.debug(f"[{self.assignment.ticker}] Dangling Check: Internal Size={self.position.relevant_position_size}, TWS Size={self.position.true_share_count}")
+        Simplified dangling shares handler - only enforces position limits.
         
+        We don't try to "fix" position mismatches. We only care that TWS position
+        doesn't exceed max_position_size. If it does, we cancel pending entry orders.
+        """
+        tws_position = abs(self.position.true_share_count)
+        max_allowed = self.assignment.max_position_size
+        
+        # Log mismatch for monitoring purposes only
         if self.position.relevant_position_size != self.position.true_share_count:
-            self.consecutive_dangling_shares_flags += 1
             logger.warning(
-                f"SHARE MISMATCH [{self.assignment.ticker}] -- "
-                f"TWS Position Size: {self.position.true_share_count}, "
-                f"Internal Position Size: {self.position.relevant_position_size}"
-                f"(Consecutive Flags: {self.consecutive_dangling_shares_flags})"
+                f"POSITION MISMATCH [{self.assignment.ticker}] -- "
+                f"TWS: {self.position.true_share_count}, "
+                f"Internal: {self.position.relevant_position_size} "
+                f"(Difference: {self.position.true_share_count - self.position.relevant_position_size})"
             )
-
-            if self.consecutive_dangling_shares_flags >= 3:
-                self._dangling_shares_protocol()
-        else:
-            if self.consecutive_dangling_shares_flags:
-                logger.success(
-                    f"SHARE MISMATCH RESOLVED [{self.assignment.ticker}] -- "
-                    f"TWS Position Size: {self.position.true_share_count}, "
-                    f"Internal Position Size: {self.position.relevant_position_size}"
-                )
-            self.consecutive_dangling_shares_flags = 0
+        
+        # ONLY action: Cancel entry orders if TWS position exceeds limit
+        if tws_position > max_allowed:
+            logger.critical(
+                f"POSITION LIMIT EXCEEDED [{self.assignment.ticker}] -- "
+                f"TWS Position: {tws_position} > Max: {max_allowed}. "
+                f"Cancelling all pending entry orders."
+            )
+            
+            # Cancel all pending entry orders
+            pending_entries = [
+                order for order in self.position.pool.orders 
+                if order.order_type == OrderType.ENTRY
+            ]
+            
+            for entry_order in pending_entries:
+                logger.warning(f"[{self.assignment.ticker}] Cancelling entry order {entry_order.order_id}")
+                self.cancel_order(entry_order)
+        
+        # Reset the consecutive flags since we're not doing complex protocols
+        self.consecutive_dangling_shares_flags = 0
 
     @queued_execution
     def handle_emergency_exit(self, final: bool = False):
@@ -929,111 +942,6 @@ class OrderExecutor(OrderStatusMixin, MarketDataMixin, TraderMixin):
                     price=stop_loss_price,
                     parent_trade=trade,
                 )
-
-    def _dangling_shares_protocol(self) -> None:
-        """
-        Place an order to cancel out dangling shares.
-        
-        CRITICAL: This protocol should only place BUY orders to acquire missing shares
-        when internal position > TWS position. It should NEVER place SELL orders when
-        TWS position > internal position, as this indicates legitimate fills that 
-        weren't tracked properly due to race conditions.
-        """
-        if not self.initialized:
-            raise RuntimeError("OrderExecutor must be initialized before placing orders")
-
-        # Check if the mismatch still exists
-        if self.position.relevant_position_size == self.position.true_share_count:
-             # If mismatch resolved, check if there's an outstanding dangling order to cancel
-             if existing_order := self.position.dangling_shares_order:
-                 logger.info(f"[{self.assignment.ticker}] Mismatch resolved. Cancelling dangling shares order {existing_order.order_id}.")
-                 self.cancel_order(existing_order)
-             return
-
-        # Calculate the mismatch
-        delta = self.position.true_share_count - self.position.relevant_position_size
-        
-        # CRITICAL FIX: Only handle cases where internal position > TWS position
-        # This means we have internal trades that weren't reflected in TWS (rare)
-        if delta >= 0:
-            # TWS position >= internal position
-            # This indicates legitimate fills that weren't tracked internally due to race conditions
-            # DO NOT place SELL orders - this would sell legitimate positions
-            logger.warning(
-                f"[{self.assignment.ticker}] TWS position ({self.position.true_share_count}) >= "
-                f"internal position ({self.position.relevant_position_size}). "
-                f"This indicates legitimate fills that weren't tracked internally. "
-                f"NOT placing dangling shares SELL order - this would be incorrect."
-            )
-            
-            # Cancel any existing dangling shares order since the mismatch is not actionable
-            if existing_order := self.position.dangling_shares_order:
-                logger.info(f"[{self.assignment.ticker}] Cancelling inappropriate dangling shares order {existing_order.order_id}.")
-                self.cancel_order(existing_order)
-            return
-
-        # delta < 0: internal position > TWS position
-        # This is the only case where we should place a BUY order to acquire missing shares
-        order_direction = OrderAction.BUY
-        order_size = abs(delta)
-        
-        # CRITICAL FIX: Check if placing this order would exceed max position size limit
-        # The dangling shares protocol should not violate position sizing rules
-        projected_tws_position = self.position.true_share_count + order_size
-        if projected_tws_position > self.assignment.max_position_size:
-            logger.warning(
-                f"[{self.assignment.ticker}] DANGLING SHARES ORDER BLOCKED! "
-                f"Placing BUY order for {order_size} shares would exceed max position size limit. "
-                f"Current TWS position: {self.position.true_share_count}, "
-                f"Projected position: {projected_tws_position}, "
-                f"Max allowed: {self.assignment.max_position_size}. "
-                f"Skipping dangling shares order to prevent position size violation."
-            )
-            
-            # Cancel any existing dangling shares order since we can't place a valid one
-            if existing_order := self.position.dangling_shares_order:
-                logger.info(f"[{self.assignment.ticker}] Cancelling existing dangling shares order {existing_order.order_id} due to position size limits.")
-                self.cancel_order(existing_order)
-            return
-        
-        logger.info(
-            f"[{self.assignment.ticker}] Internal position ({self.position.relevant_position_size}) > "
-            f"TWS position ({self.position.true_share_count}). "
-            f"Placing BUY order for {order_size} missing shares. "
-            f"Projected TWS position: {projected_tws_position}/{self.assignment.max_position_size}"
-        )
-        
-        # Determine spread strategy: BEST = True, WORST = False
-        best_spread = self.assignment.spread_strategy.upper() == "BEST"
-        
-        # BUY orders should use entry pricing with BULLISH flag
-        price = self.market_data.order_book.get_entry_price(PriceDirection.BULLISH, best_spread)
-        logger.debug(f"[{self.assignment.ticker}] Dangling shares BUY order using ENTRY pricing (BULLISH): ${price:.2f}")
-
-        # Check if a dangling shares order is already active
-        if existing_order := self.position.dangling_shares_order:
-            # Order exists. Check if it's older than 30 seconds.
-            now = datetime.now()
-            if (now - existing_order.created_at) > timedelta(seconds=30):
-                # Check if the order is still in a cancellable state internally
-                if existing_order.status in [OrderStatus.SUBMITTED, OrderStatus.PRE_SUBMITTED]:
-                    logger.info(f"[{self.assignment.ticker}] Dangling shares order {existing_order.order_id} (Status: {existing_order.status.value}) is unfilled and older than 30s. Attempting to cancel it.")
-                    self.cancel_order(existing_order)
-                else:
-                     logger.debug(f"[{self.assignment.ticker}] Dangling shares order {existing_order.order_id} is older than 30s but status is {existing_order.status.value}. Assuming already resolved or pending resolution. Waiting.")
-
-            else:
-                logger.debug(f"[{self.assignment.ticker}] Dangling shares order {existing_order.order_id} is active but younger than 30s. Waiting.")
-            return # Exit whether cancelled, waiting for status update, or too young. Let next cycle handle placement if needed.
-        else:
-            # No active order found in pool, place a new one
-            logger.info(f"[{self.assignment.ticker}] No active dangling order found. Placing new BUY order: {order_size} @ ${price:.2f}")
-            self.place_order(
-                order_type=OrderType.DANGLING_SHARES,
-                order_action=order_direction,
-                size=order_size,
-                price=price,
-            )
 
     def _emergency_exit_protocol(self, final: bool = False) -> None:
         """
