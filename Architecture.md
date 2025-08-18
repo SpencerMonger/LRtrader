@@ -410,7 +410,7 @@ Main Process
 ## Order Types and Strategies
 
 ### Order Types:
-1. **ENTRY**: Market entry orders with 60-second GTD expiration
+1. **ENTRY**: Market entry orders with 5-second GTD expiration
 2. **TAKE_PROFIT**: Profit-taking limit orders
 3. **STOP_LOSS**: Stop-limit orders for loss protection
 4. **EXIT**: Position closure orders with 10-second GTD

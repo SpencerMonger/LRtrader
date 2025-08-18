@@ -1,0 +1,1 @@
+Please read through the 'architecture.md' doc to understand the project before starting.

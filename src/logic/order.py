@@ -466,17 +466,19 @@ class TraderMixin(AbstractOrderExecutorMixin):
 
         if predicates_passed:
             # CRITICAL FIX: Check if we're at the max position limit before placing any orders
-            if self.position.size >= self.assignment.max_position_size:
+            # Use TWS position (true_share_count) instead of internal position (size) for consistency
+            current_tws_position = abs(self.position.true_share_count)
+            if current_tws_position >= self.assignment.max_position_size:
                 logger.info(
                     f"[{self.assignment.ticker}] Position at maximum limit. "
-                    f"Current: {self.position.size}, Max: {self.assignment.max_position_size}. "
+                    f"Current TWS Position: {current_tws_position}, Max: {self.assignment.max_position_size}. "
                     f"Skipping order placement."
                 )
                 return
 
-            # Calculate position size based on CURRENT position state
+            # Calculate position size based on CURRENT TWS position state
             max_position_size = self.assignment.max_position_size
-            delta_to_max = max_position_size - self.position.size
+            delta_to_max = max_position_size - current_tws_position
             position_size = min(delta_to_max, self.assignment.position_size)
 
             if position_size <= 0:
@@ -489,7 +491,7 @@ class TraderMixin(AbstractOrderExecutorMixin):
             entry_price = self.assignment.spread_strategy.upper() == "BEST"
             entry_price = self.market_data.order_book.get_entry_price(prediction.flag, best_spread)
             
-            logger.info(f"[{self.assignment.ticker}] FRESH ORDER PLACEMENT: Size={position_size}, Price=${entry_price:.2f}, Strategy={self.assignment.spread_strategy}, Current Position={self.position.size}/{max_position_size}")
+            logger.info(f"[{self.assignment.ticker}] FRESH ORDER PLACEMENT: Size={position_size}, Price=${entry_price:.2f}, Strategy={self.assignment.spread_strategy}, Current TWS Position={current_tws_position}/{max_position_size}")
 
             order_action = (
                 OrderAction.BUY if prediction.flag == PriceDirection.BULLISH else OrderAction.SELL
@@ -612,24 +614,16 @@ class TraderMixin(AbstractOrderExecutorMixin):
     @queued_execution
     def handle_max_position_size_check(self) -> None:
         """
-        Check if the current position size exceeds the maximum allowed size.
+        Check if the current TWS position size exceeds the maximum allowed size.
         If it does, cancel any pending entry orders.
         """
-        current_size = self.position.size
-        tws_size = self.position.true_share_count
+        tws_size = abs(self.position.true_share_count)
         max_size = self.assignment.max_position_size
         
-        logger.debug(f"[{self.assignment.ticker}] Position size check: Internal={current_size}, TWS={tws_size}, Max={max_size}")
+        logger.debug(f"[{self.assignment.ticker}] Position size check: TWS={tws_size}, Max={max_size}")
         
-        # Log if TWS position exceeds limits but don't trigger emergency exit
-        if tws_size > max_size:
-            logger.warning(
-                f"[{self.assignment.ticker}] TWS position ({tws_size}) exceeds max limit ({max_size}). "
-                f"This indicates position synchronization issues but will not trigger emergency exit."
-            )
-        
-        # Normal position limit check for internal position
-        if current_size >= max_size:
+        # Check if TWS position exceeds limits and cancel pending entry orders
+        if tws_size >= max_size:
             # Find all pending entry orders
             pending_entry_orders = [
                 order for order in self.position.pool.orders 
@@ -639,7 +633,7 @@ class TraderMixin(AbstractOrderExecutorMixin):
             if pending_entry_orders:
                 logger.warning(
                     f"[{self.assignment.ticker}] MAX POSITION SIZE REACHED! "
-                    f"Current: {current_size}, Max: {max_size}. "
+                    f"TWS Position: {tws_size}, Max: {max_size}. "
                     f"Cancelling {len(pending_entry_orders)} pending entry orders."
                 )
                 
@@ -647,9 +641,9 @@ class TraderMixin(AbstractOrderExecutorMixin):
                     logger.info(f"[{self.assignment.ticker}] Cancelling entry order {entry_order.order_id} ({entry_order.size} shares @ ${entry_order.limit_price})")
                     self.cancel_order(entry_order)
             else:
-                logger.info(f"[{self.assignment.ticker}] Position size at max ({current_size}/{max_size}) but no pending entry orders to cancel.")
+                logger.info(f"[{self.assignment.ticker}] TWS position at/above max ({tws_size}/{max_size}) but no pending entry orders to cancel.")
         else:
-            logger.debug(f"[{self.assignment.ticker}] Position within limits: {current_size}/{max_size}")
+            logger.debug(f"[{self.assignment.ticker}] Position within limits: {tws_size}/{max_size}")
 
 
 class OrderExecutor(OrderStatusMixin, MarketDataMixin, TraderMixin):
@@ -741,23 +735,20 @@ class OrderExecutor(OrderStatusMixin, MarketDataMixin, TraderMixin):
         if self.is_emergency_exit and order_type != OrderType.EMERGENCY_EXIT:
             return
 
-        # CRITICAL FIX: Check position size limit before placing any entry orders
+        # CRITICAL FIX: Check TWS position size limit before placing any entry orders
         if order_type == OrderType.ENTRY and order_action == OrderAction.BUY:
-            current_position = abs(self.position.size)
-            projected_position = current_position + size
+            current_tws_position = abs(self.position.true_share_count)
+            projected_tws_position = current_tws_position + size
             
-            if projected_position > self.assignment.max_position_size:
+            if projected_tws_position > self.assignment.max_position_size:
                 logger.warning(
-                    f"[{self.assignment.ticker}] ORDER BLOCKED - Position size limit exceeded! "
-                    f"Current: {current_position}, Order size: {size}, "
-                    f"Projected: {projected_position}, Max: {self.assignment.max_position_size}. "
+                    f"[{self.assignment.ticker}] ORDER BLOCKED - TWS position size limit would be exceeded! "
+                    f"Current TWS: {current_tws_position}, Order size: {size}, "
+                    f"Projected TWS: {projected_tws_position}, Max: {self.assignment.max_position_size}. "
                     f"Skipping order placement."
                 )
                 return
-        
-        # CRITICAL FIX: Also check TWS position to prevent orders when TWS position exceeds limit
-        if order_type == OrderType.ENTRY and order_action == OrderAction.BUY:
-            current_tws_position = abs(self.position.true_share_count)
+            
             if current_tws_position >= self.assignment.max_position_size:
                 logger.warning(
                     f"[{self.assignment.ticker}] ORDER BLOCKED - TWS position at/above limit! "

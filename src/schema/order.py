@@ -99,9 +99,9 @@ class MongerOrder(BaseModel):
         # Default TIF to DAY
         ib_order.tif = "DAY"
 
-        # Set GTD with 10 second expiration for ENTRY orders
+        # Set GTD with 5 second expiration for ENTRY orders
         if self.order_type == OrderType.ENTRY:
-            expiration = datetime.now(pytz.UTC) + timedelta(seconds=10) # 10 seconds
+            expiration = datetime.now(pytz.UTC) + timedelta(seconds=5) # 5 seconds
             expiration_str = expiration.strftime("%Y%m%d-%H:%M:%S")
             ib_order.tif = "GTD"
             ib_order.goodTillDate = expiration_str

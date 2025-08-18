@@ -111,7 +111,9 @@ class PositionSizePredicate(BaseBooleanPredicate[Position]):
         :param Any context: Additional context.
         :return bool: True if the position size is within thresholds, False otherwise.
         """
-        return position.size < self.assignment.max_position_size
+        # Use TWS position (true_share_count) instead of internal position (size) for consistency
+        current_tws_position = abs(position.true_share_count)
+        return current_tws_position < self.assignment.max_position_size
 
 
 ENTRY_PREDICATES = [
