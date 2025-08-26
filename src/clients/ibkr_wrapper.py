@@ -40,20 +40,79 @@ class PortfolioWrapper(EWrapper):
     level events.
     """
 
+    def error(self, reqId: int, errorCode: int, errorString: str, advancedOrderRejectJson: str = ""):
+        """
+        Debug: Log all errors to help diagnose PnL issues
+        """
+        if reqId == 1001:  # Our PnL request ID
+            logger.critical(f"❌ DEBUG: PnL REQUEST ERROR! ReqId: {reqId}, Code: {errorCode}, Message: {errorString}")
+        else:
+            logger.debug(f"IBKR Error - ReqId: {reqId}, Code: {errorCode}, Message: {errorString}")
+    
+    def connectAck(self):
+        """Debug: Log successful connection"""
+        logger.critical("🔗 DEBUG: IBKR connection acknowledged - Portfolio Manager connected successfully")
+    
+    def managedAccounts(self, accountsList: str):
+        """Debug: Log managed accounts and validate our target account"""
+        accounts = [acc.strip() for acc in accountsList.split(',')]
+        logger.critical(f"📋 DEBUG: Managed accounts received: {accounts}")
+        
+        # Validate that our target account exists in the managed accounts
+        if hasattr(self, 'account') and self.account:
+            if self.account in accounts:
+                logger.critical(f"✅ ACCOUNT VALIDATION PASSED: Target account '{self.account}' found in managed accounts")
+            else:
+                logger.critical(f"❌ ACCOUNT VALIDATION FAILED: Target account '{self.account}' NOT found in managed accounts {accounts}")
+                logger.critical(f"🚨 This will cause PnL request to fail! Check your account configuration.")
+        
+        # Store managed accounts for potential auto-correction
+        self.managed_accounts = accounts
+
+    def accountSummary(self, reqId: int, account: str, tag: str, value: str, currency: str):
+        """Debug: Log any account summary data (in case we get this instead of PnL)"""
+        logger.info(f"📊 DEBUG: Account Summary - Account: {account}, Tag: {tag}, Value: {value}, Currency: {currency}")
+
+    def accountUpdateMulti(self, reqId: int, account: str, modelCode: str, key: str, value: str, currency: str):
+        """Debug: Log account updates"""
+        logger.info(f"📈 DEBUG: Account Update - Account: {account}, Key: {key}, Value: {value}")
+    
+    def updateAccountValue(self, key: str, val: str, currency: str, accountName: str):
+        """Debug: Log account value updates (alternative to PnL)"""
+        if "PnL" in key or "UnrealizedPnL" in key or "RealizedPnL" in key:
+            logger.critical(f"💰 DEBUG: Account Value Update (PnL-related) - Key: {key}, Value: {val}, Currency: {currency}, Account: {accountName}")
+        else:
+            logger.debug(f"Account Value - Key: {key}, Value: {val}, Currency: {currency}")
+
+    def accountDownloadEnd(self, accountName: str):
+        """Debug: Log when account download completes"""
+        logger.critical(f"📥 DEBUG: Account download completed for: {accountName}")
+
+    def pnlSingle(self, reqId: int, pos: float, dailyPnL: float, unrealizedPnL: float, realizedPnL: float, value: float):
+        """Debug: Log individual position PnL (this might be getting called instead)"""
+        logger.critical(f"🎯 DEBUG: Individual Position PnL - ReqId: {reqId}, Pos: {pos}, Daily: ${dailyPnL:.2f}, Unrealized: ${unrealizedPnL:.2f}, Realized: ${realizedPnL:.2f}, Value: ${value:.2f}")
+
     def pnl(self, reqId: int, dailyPnL: float, unrealizedPnL: float, realizedPnL: float):
-        # Debug logging only every 10 seconds to avoid spam
-        if datetime.now().second % 10 == 0:
-            logger.debug(
-                f"Daily PnL: {dailyPnL}, Unrealized PnL: {unrealizedPnL}, "
-                f" Realized PnL: {realizedPnL}"
-            )
+        # DEBUG: Always log PnL callbacks to confirm they're working
+        current_time = datetime.now()
+        logger.critical(
+            f"🎯 DEBUG: PnL CALLBACK RECEIVED! ReqId: {reqId}, "
+            f"Daily: ${dailyPnL:.2f}, Unrealized: ${unrealizedPnL:.2f}, "
+            f"Realized: ${realizedPnL:.2f}, Time: {current_time.strftime('%H:%M:%S')}"
+        )
         
         # Calculate total PnL (realized + unrealized) for proper risk management
         total_pnl = realizedPnL + unrealizedPnL
-        logger.debug(f"Total PnL for threshold check: {total_pnl} (Realized: {realizedPnL} + Unrealized: {unrealizedPnL})")
+        logger.critical(f"🎯 DEBUG: Calculated Total PnL: ${total_pnl:.2f} (will check against max_pnl threshold)")
         
         # CRITICAL: Check PnL threshold on EVERY update, not just when logging
-        self.check_pnl_threshold(float(total_pnl))
+        try:
+            self.check_pnl_threshold(float(total_pnl))
+            logger.info(f"✅ DEBUG: check_pnl_threshold() completed successfully")
+        except Exception as e:
+            logger.critical(f"❌ DEBUG: check_pnl_threshold() FAILED with exception: {e}")
+            import traceback
+            logger.critical(f"Full exception traceback: {traceback.format_exc()}")
 
 
 class MongerWrapper(EWrapper):
@@ -89,7 +148,7 @@ class MongerWrapper(EWrapper):
     order_executor: OrderExecutor
     market_data: MarketData
 
-    def __init__(self, assignment: TraderAssignment, portfolio_manager: Optional["PortfolioManager"] = None, staggered_order_delay: float = 5.0):
+    def __init__(self, assignment: TraderAssignment, portfolio_manager: Optional["PortfolioManager"] = None, staggered_order_delay: float = 5.0, entry_order_timeout: int = 5, exit_order_timeout: int = 10):
         """Initialize the MongerWrapper."""
         EWrapper.__init__(self)
 
@@ -101,13 +160,15 @@ class MongerWrapper(EWrapper):
         context = {'portfolio_manager': self.portfolio_manager}
         position_obj = Position(assignment=assignment, model_config={"arbitrary_types_allowed": True}, **context)
 
-        # Initialize the order executor, passing the created position_obj and staggered delay config
+        # Initialize the order executor, passing the created position_obj and timeout configs
         self.order_executor = OrderExecutor(
             assignment=assignment, 
             position=position_obj, # Pass the created Position object
             market_data=self.market_data, 
             portfolio_manager=self.portfolio_manager,
-            staggered_order_delay=staggered_order_delay
+            staggered_order_delay=staggered_order_delay,
+            entry_order_timeout=entry_order_timeout,
+            exit_order_timeout=exit_order_timeout
         )
 
     def initialize_executor(self, tws_app: "TradeMonger") -> None:

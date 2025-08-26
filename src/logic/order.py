@@ -472,8 +472,10 @@ class TraderMixin(AbstractOrderExecutorMixin):
                 logger.info(
                     f"[{self.assignment.ticker}] Position at maximum limit. "
                     f"Current TWS Position: {current_tws_position}, Max: {self.assignment.max_position_size}. "
-                    f"Skipping order placement."
+                    f"Clearing queued orders and skipping order placement."
                 )
+                # Clear any queued handle_prediction calls to prevent stale orders
+                self.order_queue.clear_ticker_queue(self.assignment.ticker)
                 return
 
             # Calculate position size based on CURRENT TWS position state
@@ -640,8 +642,14 @@ class TraderMixin(AbstractOrderExecutorMixin):
                 for entry_order in pending_entry_orders:
                     logger.info(f"[{self.assignment.ticker}] Cancelling entry order {entry_order.order_id} ({entry_order.size} shares @ ${entry_order.limit_price})")
                     self.cancel_order(entry_order)
+            
+            # Clear any queued handle_prediction calls to prevent stale orders from executing later
+            self.order_queue.clear_ticker_queue(self.assignment.ticker)
+            
+            if pending_entry_orders:
+                logger.info(f"[{self.assignment.ticker}] Cleared queued orders for max position size condition.")
             else:
-                logger.info(f"[{self.assignment.ticker}] TWS position at/above max ({tws_size}/{max_size}) but no pending entry orders to cancel.")
+                logger.debug(f"[{self.assignment.ticker}] TWS position at/above max ({tws_size}/{max_size}) - cleared queue as precaution.")
         else:
             logger.debug(f"[{self.assignment.ticker}] Position within limits: {tws_size}/{max_size}")
 
@@ -654,7 +662,9 @@ class OrderExecutor(OrderStatusMixin, MarketDataMixin, TraderMixin):
         market_data: MarketData,
         tws_app: Optional["TradeMonger"] = None,
         portfolio_manager: Optional[Any] = None,
-        staggered_order_delay: float = 5.0
+        staggered_order_delay: float = 5.0,
+        entry_order_timeout: int = 5,
+        exit_order_timeout: int = 10
     ):
         self.assignment = assignment
         self.position = position
@@ -670,6 +680,10 @@ class OrderExecutor(OrderStatusMixin, MarketDataMixin, TraderMixin):
         self.is_emergency_exit = False
         self.clip_active = False
         self.portfolio_manager = portfolio_manager
+        
+        # Store order timeout configurations
+        self.entry_order_timeout = entry_order_timeout
+        self.exit_order_timeout = exit_order_timeout
 
         # Pass portfolio_manager in context when creating Position
         context = {'portfolio_manager': self.portfolio_manager}
@@ -764,6 +778,8 @@ class OrderExecutor(OrderStatusMixin, MarketDataMixin, TraderMixin):
             action=order_action,
             size=size,
             limit_price=price,
+            entry_order_timeout=self.entry_order_timeout,
+            exit_order_timeout=self.exit_order_timeout,
         )
 
         # Verify the order and submit it to our pool -- shoudl catch exceptions here

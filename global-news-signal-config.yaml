@@ -8,7 +8,13 @@ signal_strategy:
   enable_news_alerts: true          # Enable news alert signals from News.news_alert table
   news_alert_lookback_minutes: 2    # Minutes to look back for unique ticker detection
   enable_dynamic_discovery: true    # Enable dynamic ticker discovery from news alerts
-  staggered_order_delay: 6.0        # Seconds to wait between entry orders for same ticker
+  staggered_order_delay: 5.0        # Seconds to wait between entry orders for same ticker
+
+# Order timeout configuration - Controls GTD expiration times for different order types
+order_timeouts:
+  entry_order_timeout: 4            # Seconds for ENTRY orders (GTD)
+  exit_order_timeout: 10            # Seconds for EXIT/DANGLING_SHARES orders (GTD)
+  # EMERGENCY_EXIT orders remain GTC (Good Till Cancelled)
 
 # Price-based position sizing tier list
 # Position sizes are determined by the stock price at the moment of signal detection
@@ -16,14 +22,14 @@ tier_list:
   - price_min: 0.01
     price_max: 1.00
     unit_position_size: 10000
-    max_position_size: 20000
+    max_position_size: 25000
   - price_min: 1.00
     price_max: 3.00
-    unit_position_size: 8000
-    max_position_size: 16000
+    unit_position_size: 7500
+    max_position_size: 15000
   - price_min: 3.00
     price_max: 5.00
-    unit_position_size: 5000
+    unit_position_size: 50000
     max_position_size: 10000
   - price_min: 5.00
     price_max: 8.00
@@ -45,8 +51,8 @@ global_defaults:
   max_position_size: 3000            # Maximum position size for all tickers (fallback)
   trade_threshold: 120              # Seconds between trades
   max_hold_time: 10800              # Maximum hold time in seconds
-  take_profit_target: 0.75         # Take profit target (0.2%)
-  stop_loss_target: 0.20           # Stop loss target (0.5%)
+  take_profit_target: 0.25         # Take profit target (0.2%)
+  stop_loss_target: 0.15           # Stop loss target (0.5%)
   stop_loss_strat: STATIC           # Stop loss strategy
   spread_strategy: WORST             # Spread strategy
   spread_offset: 0                  # Spread offset
@@ -55,7 +61,7 @@ global_defaults:
 # Position-wide risk management settings
 position:
   max_loss_per_trade: 10000          # Maximum loss per trade
-  max_loss_cumulative: 10000         # Maximum cumulative loss
+  max_loss_cumulative: 20000         # Maximum cumulative loss
   clip_activation: 8000             # Clip activation level
   clip_stop_loss: 2000             # Clip stop loss level
 

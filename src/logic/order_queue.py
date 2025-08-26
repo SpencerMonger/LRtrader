@@ -43,6 +43,37 @@ class OrderQueue:
             
             self.queue.put((func, args, kwargs, ticker))
 
+    def clear_ticker_queue(self, ticker: str):
+        """Clear all queued handle_prediction calls for a specific ticker."""
+        if not self.is_running:
+            return
+        
+        # Temporarily store non-ticker items
+        temp_items = []
+        cleared_count = 0
+        
+        # Drain the queue
+        while True:
+            try:
+                func, args, kwargs, queued_ticker = self.queue.get_nowait()
+                
+                # Keep items that are not handle_prediction calls for this ticker
+                if not (queued_ticker == ticker and func.__name__ == 'handle_prediction'):
+                    temp_items.append((func, args, kwargs, queued_ticker))
+                else:
+                    cleared_count += 1
+                    self.queue.task_done()  # Mark as done since we're removing it
+                    
+            except queue.Empty:
+                break
+        
+        # Put back the items we want to keep
+        for item in temp_items:
+            self.queue.put(item)
+        
+        if cleared_count > 0:
+            logger.info(f"[{ticker}] Cleared {cleared_count} queued handle_prediction calls from order queue")
+
     def _worker(self):
         """Worker thread to process queued function calls."""
         while self.is_running:

@@ -80,7 +80,9 @@ fi
 echo "$(date) [UTC]: Starting newstrader in a screen session" >> "$LOG_FILE"
 echo "$(date) [UTC]: Python application will create its own logs in $LOG_DIR" >> "$LOG_FILE"
 # The python script now handles its own logging, so we don't redirect stdout/stderr here.
-cd "$PROJECT_DIR" && screen -dmS newstrader /home/synk/.local/bin/pdm run python src/run_local.py --config global-news-signal-config.yaml --port 7497
+COMMAND="/home/synk/.local/bin/pdm run python src/run_local.py --config global-news-signal-config.yaml --port 7496"
+PORT=$(echo "$COMMAND" | grep -o '\--port [0-9]\+' | grep -o '[0-9]\+')
+cd "$PROJECT_DIR" && screen -dmS newstrader $COMMAND
 echo "Started screen session with name 'newstrader'" >> "$EXEC_LOG"
 
 # Give it a moment to start
@@ -90,6 +92,7 @@ sleep 2
 if screen -ls | grep -q "newstrader"; then
     echo "$(date) [UTC]: Confirmed newstrader screen session is running" >> "$LOG_FILE"
     echo "SUCCESS: newstrader screen session is running" >> "$LOG_FILE"
+    echo "running on port $PORT"
 else
     echo "$(date) [UTC]: ERROR: Failed to start newstrader screen session" >> "$LOG_FILE"
     echo "ERROR: Failed to start newstrader screen session" >> "$LOG_FILE"

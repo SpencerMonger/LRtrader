@@ -11,7 +11,7 @@ from loguru import logger
 
 from app import TradeMonger
 from portfolio_app import PortfolioManager
-from schema.assignment import TraderAssignment, AssignmentFactory
+from schema.assignment import TraderAssignment, AssignmentFactory, OrderTimeouts
 from predictions.composite_signal_provider import CompositeSignalProvider
 
 
@@ -63,6 +63,8 @@ class MongerManager:
         # Create signal configuration from config file
         signal_config_dict = {}
         staggered_order_delay = 5.0  # Default value
+        entry_order_timeout = 5  # Default value
+        exit_order_timeout = 10  # Default value
         if self.config_path:
             try:
                 signal_config = AssignmentFactory.create_signal_config(self.config_path)
@@ -74,7 +76,14 @@ class MongerManager:
                 }
                 # Extract staggered_order_delay from signal_config
                 staggered_order_delay = getattr(signal_config, 'staggered_order_delay', 5.0)
+                
+                # Load order timeout configuration
+                order_timeouts_config = AssignmentFactory.create_order_timeouts_config(self.config_path)
+                entry_order_timeout = order_timeouts_config.entry_order_timeout
+                exit_order_timeout = order_timeouts_config.exit_order_timeout
+                
                 logger.info(f"Loaded signal config from {self.config_path} with staggered_order_delay: {staggered_order_delay}s")
+                logger.info(f"Loaded order timeouts: entry={entry_order_timeout}s, exit={exit_order_timeout}s")
             except Exception as e:
                 logger.error(f"Failed to load signal config from {self.config_path}: {e}")
                 # Use default config for backward compatibility
@@ -93,8 +102,10 @@ class MongerManager:
                 'enable_dynamic_discovery': False
             }
         
-        # Store staggered_order_delay as instance variable for use in _handle_new_ticker
+        # Store timeout configurations as instance variables for use in _handle_new_ticker
         self.staggered_order_delay = staggered_order_delay
+        self.entry_order_timeout = entry_order_timeout
+        self.exit_order_timeout = exit_order_timeout
         
         # Initialize the composite signal provider
         try:
@@ -120,13 +131,15 @@ class MongerManager:
         # Now, initialize TradeMonger instances, passing the portfolio_manager reference
         for assignment in self.assignments:
             try:
-                # Create monger, passing self.portfolio_manager
+                # Create monger, passing self.portfolio_manager and timeout configs
                 monger = TradeMonger(
                     assignment=assignment, 
                     account_id=self.account, 
                     signal_provider=self.signal_provider,
                     portfolio_manager=self.portfolio_manager, # Pass the manager instance
-                    staggered_order_delay=self.staggered_order_delay
+                    staggered_order_delay=self.staggered_order_delay,
+                    entry_order_timeout=self.entry_order_timeout,
+                    exit_order_timeout=self.exit_order_timeout
                 )
                 self.mongers.append(monger) # Add the created monger to the list
             except Exception as e:
@@ -383,7 +396,9 @@ class MongerManager:
                     account_id=self.account,
                     signal_provider=self.signal_provider,
                     portfolio_manager=self.portfolio_manager,
-                    staggered_order_delay=self.staggered_order_delay
+                    staggered_order_delay=self.staggered_order_delay,
+                    entry_order_timeout=self.entry_order_timeout,
+                    exit_order_timeout=self.exit_order_timeout
                 )
                 
                 # Add to our mongers list

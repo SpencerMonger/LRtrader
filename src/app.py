@@ -51,9 +51,9 @@ class TradeMonger(MongerWrapper, MongerClient):
 
     """
 
-    def __init__(self, assignment: TraderAssignment, account_id: str, signal_provider: CompositeSignalProvider, portfolio_manager: "PortfolioManager", staggered_order_delay: float = 5.0):
-        # Pass portfolio_manager and staggered_order_delay to MongerWrapper superclass
-        MongerWrapper.__init__(self, assignment=assignment, portfolio_manager=portfolio_manager, staggered_order_delay=staggered_order_delay)
+    def __init__(self, assignment: TraderAssignment, account_id: str, signal_provider: CompositeSignalProvider, portfolio_manager: "PortfolioManager", staggered_order_delay: float = 5.0, entry_order_timeout: int = 5, exit_order_timeout: int = 10):
+        # Pass portfolio_manager and timeout configs to MongerWrapper superclass
+        MongerWrapper.__init__(self, assignment=assignment, portfolio_manager=portfolio_manager, staggered_order_delay=staggered_order_delay, entry_order_timeout=entry_order_timeout, exit_order_timeout=exit_order_timeout)
         MongerClient.__init__(self, wrapper=self)
 
         self.account_id = account_id

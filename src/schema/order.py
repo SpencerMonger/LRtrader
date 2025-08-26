@@ -34,6 +34,10 @@ class MongerOrder(BaseModel):
     avg_price: float = Field(0.0)
     status: OrderStatus = Field(OrderStatus.SUBMITTED)
     created_at: datetime = Field(default_factory=datetime.now)
+    
+    # Order timeout configurations
+    entry_order_timeout: int = Field(5, description="Seconds for ENTRY orders (GTD)")
+    exit_order_timeout: int = Field(10, description="Seconds for EXIT/DANGLING_SHARES orders (GTD)")
 
     @property
     def ib_order_type(self) -> str:
@@ -99,19 +103,19 @@ class MongerOrder(BaseModel):
         # Default TIF to DAY
         ib_order.tif = "DAY"
 
-        # Set GTD with 5 second expiration for ENTRY orders
+        # Set GTD with configurable expiration for ENTRY orders
         if self.order_type == OrderType.ENTRY:
-            expiration = datetime.now(pytz.UTC) + timedelta(seconds=5) # 5 seconds
+            expiration = datetime.now(pytz.UTC) + timedelta(seconds=self.entry_order_timeout)
             expiration_str = expiration.strftime("%Y%m%d-%H:%M:%S")
             ib_order.tif = "GTD"
             ib_order.goodTillDate = expiration_str
 
-        # Use GTD with 10 second expiration ONLY for EXIT and DANGLING_SHARES
+        # Use GTD with configurable expiration for EXIT and DANGLING_SHARES
         elif (
             self.order_type == OrderType.EXIT
             or self.order_type == OrderType.DANGLING_SHARES
         ):
-            expiration = datetime.now(pytz.UTC) + timedelta(seconds=10) # 10 seconds
+            expiration = datetime.now(pytz.UTC) + timedelta(seconds=self.exit_order_timeout)
             expiration_str = expiration.strftime("%Y%m%d-%H:%M:%S")
             ib_order.tif = "GTD"
             ib_order.goodTillDate = expiration_str

@@ -47,11 +47,21 @@ class PortfolioManager(PortfolioWrapper, MongerClient):
         super().nextValidId(orderId)
         logger.info(f"Next Valid Order ID: {orderId}")
 
-        # Initial request for account updates
-        self.reqPnL(1001, self.account, "")
+        # DEBUG: Log the exact PnL request details
+        logger.critical(f"🔍 DEBUG: About to make PnL request - Account: '{self.account}', ReqId: 1001, Max PnL: {self.max_pnl}")
+        
+        try:
+            # Initial request for account updates
+            self.reqPnL(1001, self.account, "")
+            logger.critical("✅ DEBUG: reqPnL() call completed successfully - waiting for pnl() callbacks...")
+        except Exception as e:
+            logger.critical(f"❌ DEBUG: reqPnL() call FAILED with exception: {e}")
+            import traceback
+            logger.critical(f"Full exception traceback: {traceback.format_exc()}")
 
         # Request the orders
         self.reqAutoOpenOrders(True)
+        logger.info("🔍 DEBUG: reqAutoOpenOrders() call completed")
 
     def run(self) -> None:
         self.running = True
@@ -73,24 +83,32 @@ class PortfolioManager(PortfolioWrapper, MongerClient):
         
         :param pnl: Total PnL (realized + unrealized) for the account
         """
-        logger.debug(f"PnL Threshold Check: Current Total PnL = ${pnl:.2f}, Max Loss Threshold = ${self.max_pnl:.2f}")
+        # DEBUG: Always log threshold checks so we can see the system working
+        logger.critical(f"🛡️ DEBUG: PnL Threshold Check - Current Total PnL: ${pnl:.2f}, Max Loss Threshold: ${self.max_pnl:.2f}")
         
         if pnl < self.max_pnl:
             logger.critical(
-                f"PORTFOLIO RISK LIMIT BREACHED! "
+                f"🚨🚨🚨 PORTFOLIO RISK LIMIT BREACHED! 🚨🚨🚨 "
                 f"Total PnL (${pnl:.2f}) has exceeded maximum loss threshold (${self.max_pnl:.2f}). "
                 f"Triggering emergency shutdown of all positions."
             )
-            with start_blocking_portal(backend="asyncio") as portal:
-                portal.call(self.cancel_func)
+            try:
+                with start_blocking_portal(backend="asyncio") as portal:
+                    portal.call(self.cancel_func)
+                logger.critical("✅ DEBUG: Emergency shutdown triggered successfully")
+            except Exception as e:
+                logger.critical(f"❌ DEBUG: Emergency shutdown FAILED: {e}")
         else:
+            # Calculate how close we are to the limit
+            remaining_capacity = pnl - self.max_pnl
+            logger.info(f"✅ DEBUG: Risk check PASSED - Remaining loss capacity: ${remaining_capacity:.2f}")
+            
             # Only log when we're getting close to the threshold (within 80%)
             threshold_ratio = pnl / self.max_pnl if self.max_pnl != 0 else 0
             if threshold_ratio > 0.8:
-                remaining_loss_capacity = pnl - self.max_pnl
                 logger.warning(
-                    f"Approaching risk limit: Total PnL = ${pnl:.2f}, "
-                    f"Remaining loss capacity = ${remaining_loss_capacity:.2f}"
+                    f"⚠️ WARNING: Approaching risk limit! Total PnL = ${pnl:.2f}, "
+                    f"Remaining loss capacity = ${remaining_capacity:.2f} (at {threshold_ratio*100:.1f}% of limit)"
                 )
 
     def openOrder(self, orderId: OrderId, contract: Contract, order: Order, orderState: OrderState):

@@ -43,11 +43,36 @@ AFTERNOON_END = est_tz.localize(datetime.combine(datetime.today(), time(16, 5)))
 def parse_arguments() -> argparse.Namespace:
     """Parse command-line arguments."""
     parser = argparse.ArgumentParser(description="Monger Trading Algorithm - Production Runner")
-    parser.add_argument("--account", default="DUA725288")
+    parser.add_argument("--account", default=None, help="Account code (auto-detected based on port if not specified)")
     parser.add_argument("--host", default="127.0.0.1", help="Host address (default: 127.0.0.1)")
-    parser.add_argument("--port", type=int, default=7497, help="Port number (default: 7497)")
+    parser.add_argument("--port", type=int, default=7497, help="Port number (default: 7497 for paper, 7496 for live)")
     parser.add_argument("--config", required=True, help="Path to the configuration YAML file")
     return parser.parse_args()
+
+def detect_account_from_port(port: int, provided_account: str = None) -> str:
+    """
+    Detect account code based on port number.
+    Port 7496 = Live trading
+    Port 7497 = Paper trading  
+    """
+    # Port-based account mapping (you can update these with your actual account codes)
+    PORT_TO_ACCOUNT_MAP = {
+        7496: "U15754950",  # Live account
+        7497: "DUA725288",  # Paper account
+    }
+    
+    if provided_account:
+        logger.info(f"Using provided account: {provided_account}")
+        return provided_account
+    
+    if port in PORT_TO_ACCOUNT_MAP:
+        detected_account = PORT_TO_ACCOUNT_MAP[port]
+        logger.critical(f"🎯 AUTO-DETECTED ACCOUNT: Port {port} -> Account {detected_account} ({'LIVE' if port == 7496 else 'PAPER'} trading)")
+        return detected_account
+    else:
+        # Fallback to paper trading account for safety
+        logger.warning(f"Unknown port {port}, defaulting to paper trading account")
+        return "DUA725288"
 
 
 # State Management
@@ -272,7 +297,11 @@ async def main():
         for assignment in assignments:
             logger.info(f"Configured trader for {assignment.ticker}")
 
-        manager = MongerManager(assignments, args.account, host=host, port=port, max_pnl=max_pnl)
+        # Auto-detect account based on port for safety
+        detected_account = detect_account_from_port(port, args.account)
+        logger.critical(f"🎯 FINAL ACCOUNT: Using account '{detected_account}' for {'LIVE' if port == 7496 else 'PAPER'} trading on port {port}")
+
+        manager = MongerManager(assignments, detected_account, host=host, port=port, max_pnl=max_pnl)
 
         def signal_handler(signum, frame):
             global shutdown_flag

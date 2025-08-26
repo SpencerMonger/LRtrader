@@ -40,6 +40,13 @@ class PositionConfig(BaseModel):
     clip_stop_loss: float
 
 
+class OrderTimeouts(BaseModel):
+    """Configuration for order timeout settings."""
+    
+    entry_order_timeout: int = Field(5, description="Seconds for ENTRY orders (GTD)")
+    exit_order_timeout: int = Field(10, description="Seconds for EXIT/DANGLING_SHARES orders (GTD)")
+
+
 class SignalConfig(BaseModel):
     """Configuration for signal providers."""
     
@@ -252,6 +259,33 @@ class AssignmentFactory:
                 continue
 
         return assignments
+
+    @classmethod
+    def create_order_timeouts_config(cls, config_path: str | Path) -> OrderTimeouts:
+        """Create OrderTimeouts from a config file."""
+        config = cls.load_config(config_path)
+        
+        # Extract order timeout configuration with defaults
+        order_timeout_data = config.get("order_timeouts", {})
+        
+        # Default configuration for backward compatibility
+        default_timeout_config = {
+            "entry_order_timeout": 5,
+            "exit_order_timeout": 10
+        }
+        
+        # Merge with defaults
+        final_config = {**default_timeout_config, **order_timeout_data}
+        
+        try:
+            order_timeouts = OrderTimeouts(**final_config)
+            logger.info(f"Created order timeouts config: entry={order_timeouts.entry_order_timeout}s, "
+                       f"exit={order_timeouts.exit_order_timeout}s")
+            return order_timeouts
+        except Exception as e:
+            logger.error(f"Error creating order timeouts config: {str(e)}")
+            # Return default config on error
+            return OrderTimeouts()
 
     @classmethod
     def create_signal_config(cls, config_path: str | Path) -> SignalConfig:
