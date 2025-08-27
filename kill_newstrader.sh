@@ -2,7 +2,7 @@
 
 # Define home and project directories with absolute paths
 HOME="/home/synk"
-PROJECT_DIR="$HOME/Development/newstrader"
+PROJECT_DIR="$HOME/Development/LRtrader"
 LOG_DIR="$PROJECT_DIR/logs"
 mkdir -p "$LOG_DIR"
 
@@ -28,12 +28,12 @@ if screen -ls | grep -q "newstrader"; then
 
     echo "$(date) [UTC]: Waiting 10 minutes for newstrader to safely unwind positions..." >> "$LOG_FILE"
     echo "Graceful shutdown initiated. Waiting 10 minutes for positions to unwind..."
-    
+
     # Wait 10 minutes for the process to clean up
     sleep 600
-    
+
     echo "$(date) [UTC]: Grace period complete, now terminating screen session" >> "$LOG_FILE"
-    
+
     # Now terminate the screen session
     screen -X -S newstrader quit
 
@@ -50,7 +50,7 @@ if screen -ls | grep -q "newstrader"; then
             kill -9 "$screen_pid"
             sleep 1
         fi
-        
+
         # Check again after forced kill
         if screen -ls | grep -q "newstrader"; then
             echo "$(date) [UTC]: ERROR: Still could not kill the screen session" >> "$LOG_FILE"
@@ -71,7 +71,7 @@ if [ ! -z "$newstrader_pids" ]; then
     echo "$(date) [UTC]: Found related Python processes. Attempting to terminate: $newstrader_pids" >> "$LOG_FILE"
     kill $newstrader_pids
     sleep 1
-    
+
     # Check if processes are still running
     remaining_pids=$(pgrep -f "python.*run_local\.py")
     if [ ! -z "$remaining_pids" ]; then

@@ -1,8 +1,8 @@
-# Newstrader Architecture Guide
+# LRtrader Architecture Guide
 
 ## Overview
 
-Newstrader is a sophisticated algorithmic trading system built for Interactive Brokers (IBKR) that executes trades based on multiple signal sources including machine learning predictions and news alerts. The system is designed for high-frequency, multi-ticker trading with robust risk management and position tracking.
+LRtrader is a sophisticated algorithmic trading system built for Interactive Brokers (IBKR) that executes trades based on multiple signal sources including machine learning predictions and news alerts. The system is designed for high-frequency, multi-ticker trading with robust risk management and position tracking.
 
 ## Core Architecture
 
@@ -27,7 +27,7 @@ Newstrader is a sophisticated algorithmic trading system built for Interactive B
 ## Directory Structure
 
 ```
-newstrader/
+LRtrader/
 ├── src/                          # Core application code
 │   ├── app.py                   # TradeMonger - main trading class
 │   ├── manager.py               # MongerManager - orchestrates multiple traders
@@ -274,14 +274,14 @@ Position → First: 0s → Order → Update → if >= max → Find ENTRY → Cre
 ### 3. **NEW** Enhanced Emergency Exit Flow with Aggressive Retry
 ```
 Emergency → Cancel All → Start Retry → Every 10s → Cancel Previous → Place New → Monitor Position
- Trigger      Orders      Loop                      Exit Order      Exit Order      
+ Trigger      Orders      Loop                      Exit Order      Exit Order
     │           │           │           │              │              │              │
     ▼           ▼           ▼           ▼              ▼              ▼              ▼
 Risk Event → Stop Trading → Dynamic → Retry Loop → Current Bid/Ask → Market Order → Check Size
     │           │        Task Start      │              │              │              │
     ▼           ▼           ▼           ▼              ▼              ▼              ▼
 Position → Emergency → Task Group → 10s Interval → Fresh Pricing → Fast Execution → Until Zero
- Limit      Exit Flag    Addition                                                     
+ Limit      Exit Flag    Addition
     │           │           │           │              │              │              │
     ▼           ▼           ▼           ▼              ▼              ▼              ▼
 Exceeded → Set Flag → Runtime → Continuous → Aggressive → Immediate → Position = 0
@@ -583,4 +583,4 @@ Main Process
 - **Risk-Based Escalation**: Increasing aggressiveness based on risk levels
 - **Portfolio-Wide Coordination**: Coordinated emergency exits across all positions
 
-This architecture provides a robust foundation for algorithmic trading with clear separation of concerns, comprehensive risk management, optimized performance, and scalable design patterns. The recent enhancements significantly improve system reliability, timing performance, and risk control capabilities, with the new aggressive emergency exit system providing unparalleled position liquidation capabilities for risk management. 
+This architecture provides a robust foundation for algorithmic trading with clear separation of concerns, comprehensive risk management, optimized performance, and scalable design patterns. The recent enhancements significantly improve system reliability, timing performance, and risk control capabilities, with the new aggressive emergency exit system providing unparalleled position liquidation capabilities for risk management.
