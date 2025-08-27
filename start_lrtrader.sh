@@ -7,11 +7,11 @@ LOG_DIR="$PROJECT_DIR/logs"
 mkdir -p "$LOG_DIR"
 
 # Clean up old start/kill script logs (older than 5 days)
-find "$LOG_DIR" -name "start_newstrader_*.log" -type f -mtime +5 -delete
-find "$LOG_DIR" -name "kill_newstrader_*.log" -type f -mtime +5 -delete
+find "$LOG_DIR" -name "start_lrtrader_*.log" -type f -mtime +5 -delete
+find "$LOG_DIR" -name "kill_lrtrader_*.log" -type f -mtime +5 -delete
 
 # Log file for today
-LOG_FILE="$LOG_DIR/start_newstrader_$(date +\%Y\%m\%d).log"
+LOG_FILE="$LOG_DIR/start_lrtrader_$(date +\%Y\%m\%d).log"
 EXEC_LOG="$LOG_DIR/script_execution.log"
 
 # Log the execution
@@ -23,7 +23,7 @@ echo "HOME: $HOME" >> "$EXEC_LOG"
 echo "=========================" >> "$EXEC_LOG"
 
 # Make sure the kill script is executable
-chmod +x "$PROJECT_DIR/kill_newstrader.sh"
+chmod +x "$PROJECT_DIR/kill_lrtrader.sh"
 
 # Change to the project directory
 cd "$PROJECT_DIR" || {
@@ -50,16 +50,16 @@ if ! command -v screen &> /dev/null; then
 fi
 
 # Kill existing screen session if it exists
-if screen -ls | grep -q "newstrader"; then
-    echo "$(date) [UTC]: newstrader screen session already exists, killing old one first" >> "$LOG_FILE"
-    screen -X -S newstrader quit
+if screen -ls | grep -q "lrtrader"; then
+    echo "$(date) [UTC]: lrtrader screen session already exists, killing old one first" >> "$LOG_FILE"
+    screen -X -S lrtrader quit
     sleep 2
 
     # Double check if it was killed
-    if screen -ls | grep -q "newstrader"; then
+    if screen -ls | grep -q "lrtrader"; then
         echo "$(date) [UTC]: WARNING: Could not kill existing screen session" >> "$LOG_FILE"
         # Try more aggressively to kill the session
-        screen_pid=$(screen -ls | grep newstrader | awk '{print $1}' | cut -d. -f1)
+        screen_pid=$(screen -ls | grep lrtrader | awk '{print $1}' | cut -d. -f1)
         if [ ! -z "$screen_pid" ]; then
             echo "$(date) [UTC]: Attempting to kill screen session with PID $screen_pid" >> "$LOG_FILE"
             kill -9 "$screen_pid"
@@ -68,34 +68,34 @@ if screen -ls | grep -q "newstrader"; then
     fi
 fi
 
-# Additional check for any running Python processes related to the newstrader app
-newstrader_pids=$(pgrep -f "python.*run_local\.py")
-if [ ! -z "$newstrader_pids" ]; then
-    echo "$(date) [UTC]: Found related Python processes. Attempting to terminate: $newstrader_pids" >> "$LOG_FILE"
-    kill $newstrader_pids
+# Additional check for any running Python processes related to the lrtrader app
+lrtrader_pids=$(pgrep -f "python.*run_local\.py")
+if [ ! -z "$lrtrader_pids" ]; then
+    echo "$(date) [UTC]: Found related Python processes. Attempting to terminate: $lrtrader_pids" >> "$LOG_FILE"
+    kill $lrtrader_pids
     sleep 1
 fi
 
 # Run script in screen session using pdm
-echo "$(date) [UTC]: Starting newstrader in a screen session" >> "$LOG_FILE"
+echo "$(date) [UTC]: Starting lrtrader in a screen session" >> "$LOG_FILE"
 echo "$(date) [UTC]: Python application will create its own logs in $LOG_DIR" >> "$LOG_FILE"
 # The python script now handles its own logging, so we don't redirect stdout/stderr here.
-COMMAND="/home/synk/.local/bin/pdm run python src/run_local.py --config global-news-signal-config.yaml --port 7497"
+COMMAND="/home/synk/.local/bin/pdm run python src/run_local.py --config crossover-config.yaml --port 7497"
 PORT=$(echo "$COMMAND" | grep -o '\--port [0-9]\+' | grep -o '[0-9]\+')
-cd "$PROJECT_DIR" && screen -dmS newstrader $COMMAND
-echo "Started screen session with name 'newstrader'" >> "$EXEC_LOG"
+cd "$PROJECT_DIR" && screen -dmS lrtrader $COMMAND
+echo "Started screen session with name 'lrtrader'" >> "$EXEC_LOG"
 
 # Give it a moment to start
 sleep 2
 
 # Verify screen session is running
-if screen -ls | grep -q "newstrader"; then
-    echo "$(date) [UTC]: Confirmed newstrader screen session is running" >> "$LOG_FILE"
-    echo "SUCCESS: newstrader screen session is running" >> "$LOG_FILE"
+if screen -ls | grep -q "lrtrader"; then
+    echo "$(date) [UTC]: Confirmed lrtrader screen session is running" >> "$LOG_FILE"
+    echo "SUCCESS: lrtrader screen session is running" >> "$LOG_FILE"
     echo "running on port $PORT"
 else
-    echo "$(date) [UTC]: ERROR: Failed to start newstrader screen session" >> "$LOG_FILE"
-    echo "ERROR: Failed to start newstrader screen session" >> "$LOG_FILE"
+    echo "$(date) [UTC]: ERROR: Failed to start lrtrader screen session" >> "$LOG_FILE"
+    echo "ERROR: Failed to start lrtrader screen session" >> "$LOG_FILE"
     exit 1
 fi
 

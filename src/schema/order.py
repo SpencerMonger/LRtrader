@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, time
+from datetime import datetime, timedelta
 from typing import Any, Optional
 
 from ibapi.order import Order as IBOrder
@@ -34,7 +34,7 @@ class MongerOrder(BaseModel):
     avg_price: float = Field(0.0)
     status: OrderStatus = Field(OrderStatus.SUBMITTED)
     created_at: datetime = Field(default_factory=datetime.now)
-    
+
     # Order timeout configurations
     entry_order_timeout: int = Field(5, description="Seconds for ENTRY orders (GTD)")
     exit_order_timeout: int = Field(10, description="Seconds for EXIT/DANGLING_SHARES orders (GTD)")
@@ -87,7 +87,7 @@ class MongerOrder(BaseModel):
         ib_order.action = self.action.value
         ib_order.orderType = self.ib_order_type
         ib_order.totalQuantity = int(self.size)
-        
+
         # Only set limit price for non-market orders
         if self.ib_order_type != "MKT":
             ib_order.lmtPrice = round(self.limit_price, 2)
@@ -95,8 +95,8 @@ class MongerOrder(BaseModel):
         # Explicitly set etradeOnly to False to avoid default issues
         ib_order.etradeOnly = False
 
-        # Hardcode outsideRth to True since this codebase ONLY trades outside regular market hours
-        ib_order.outsideRth = True
+        # Set outsideRth to False for regular market hours trading (9:30 AM - 4:00 PM ET)
+        ib_order.outsideRth = False
 
         ib_order.transmit = True
 
@@ -111,10 +111,7 @@ class MongerOrder(BaseModel):
             ib_order.goodTillDate = expiration_str
 
         # Use GTD with configurable expiration for EXIT and DANGLING_SHARES
-        elif (
-            self.order_type == OrderType.EXIT
-            or self.order_type == OrderType.DANGLING_SHARES
-        ):
+        elif self.order_type == OrderType.EXIT or self.order_type == OrderType.DANGLING_SHARES:
             expiration = datetime.now(pytz.UTC) + timedelta(seconds=self.exit_order_timeout)
             expiration_str = expiration.strftime("%Y%m%d-%H:%M:%S")
             ib_order.tif = "GTD"

@@ -7,11 +7,11 @@ LOG_DIR="$PROJECT_DIR/logs"
 mkdir -p "$LOG_DIR"
 
 # Clean up old start/kill script logs (older than 5 days)
-find "$LOG_DIR" -name "start_newstrader_*.log" -type f -mtime +5 -delete
-find "$LOG_DIR" -name "kill_newstrader_*.log" -type f -mtime +5 -delete
+find "$LOG_DIR" -name "start_lrtrader_*.log" -type f -mtime +5 -delete
+find "$LOG_DIR" -name "kill_lrtrader_*.log" -type f -mtime +5 -delete
 
 # Log file for today
-LOG_FILE="$LOG_DIR/kill_newstrader_$(date +\%Y\%m\%d).log"
+LOG_FILE="$LOG_DIR/kill_lrtrader_$(date +\%Y\%m\%d).log"
 
 echo "=========================" >> "$LOG_FILE"
 echo "Kill script executed at $(date) [UTC]" >> "$LOG_FILE"
@@ -19,14 +19,14 @@ echo "User: $(whoami)" >> "$LOG_FILE"
 echo "PWD: $(pwd)" >> "$LOG_FILE"
 echo "=========================" >> "$LOG_FILE"
 
-echo "$(date) [UTC]: Attempting graceful shutdown of newstrader application" >> "$LOG_FILE"
+echo "$(date) [UTC]: Attempting graceful shutdown of lrtrader application" >> "$LOG_FILE"
 
 # First send SIGINT (Ctrl+C) to the process running in the screen session
-if screen -ls | grep -q "newstrader"; then
+if screen -ls | grep -q "lrtrader"; then
     echo "$(date) [UTC]: Sending Ctrl+C signal to gracefully terminate the process" >> "$LOG_FILE"
-    screen -S newstrader -X stuff '^C'
+    screen -S lrtrader -X stuff '^C'
 
-    echo "$(date) [UTC]: Waiting 10 minutes for newstrader to safely unwind positions..." >> "$LOG_FILE"
+    echo "$(date) [UTC]: Waiting 10 minutes for lrtrader to safely unwind positions..." >> "$LOG_FILE"
     echo "Graceful shutdown initiated. Waiting 10 minutes for positions to unwind..."
 
     # Wait 10 minutes for the process to clean up
@@ -35,16 +35,16 @@ if screen -ls | grep -q "newstrader"; then
     echo "$(date) [UTC]: Grace period complete, now terminating screen session" >> "$LOG_FILE"
 
     # Now terminate the screen session
-    screen -X -S newstrader quit
+    screen -X -S lrtrader quit
 
     # Give it a moment to terminate
     sleep 2
 
     # Double check
-    if screen -ls | grep -q "newstrader"; then
+    if screen -ls | grep -q "lrtrader"; then
         echo "$(date) [UTC]: WARNING: Screen session could not be killed after quit command" >> "$LOG_FILE"
         # Try more aggressively to kill the session
-        screen_pid=$(screen -ls | grep newstrader | awk '{print $1}' | cut -d. -f1)
+        screen_pid=$(screen -ls | grep lrtrader | awk '{print $1}' | cut -d. -f1)
         if [ ! -z "$screen_pid" ]; then
             echo "$(date) [UTC]: Attempting to kill screen session with PID $screen_pid" >> "$LOG_FILE"
             kill -9 "$screen_pid"
@@ -52,7 +52,7 @@ if screen -ls | grep -q "newstrader"; then
         fi
 
         # Check again after forced kill
-        if screen -ls | grep -q "newstrader"; then
+        if screen -ls | grep -q "lrtrader"; then
             echo "$(date) [UTC]: ERROR: Still could not kill the screen session" >> "$LOG_FILE"
             echo "ERROR: Failed to terminate newstrader screen session" >> "$LOG_FILE"
         else
@@ -65,11 +65,11 @@ if screen -ls | grep -q "newstrader"; then
     fi
 fi
 
-# Additional check for any running Python processes related to the newstrader app
-newstrader_pids=$(pgrep -f "python.*run_local\.py")
-if [ ! -z "$newstrader_pids" ]; then
-    echo "$(date) [UTC]: Found related Python processes. Attempting to terminate: $newstrader_pids" >> "$LOG_FILE"
-    kill $newstrader_pids
+# Additional check for any running Python processes related to the lrtrader app
+lrtrader_pids=$(pgrep -f "python.*run_local\.py")
+if [ ! -z "$lrtrader_pids" ]; then
+    echo "$(date) [UTC]: Found related Python processes. Attempting to terminate: $lrtrader_pids" >> "$LOG_FILE"
+    kill $lrtrader_pids
     sleep 1
 
     # Check if processes are still running
